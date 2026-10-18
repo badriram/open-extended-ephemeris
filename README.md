@@ -182,4 +182,8 @@ The branch holds only the latest files:
 ## Licence
 
 MIT. See [LICENSE](LICENSE), except `vendor/erfa` (BSD-3-Clause, see its LICENSE). The published
-data carries the MIT licence; CODE and the IGS ask that their products be credited.
+data carries the MIT licence. It is derived from CODE's orbit predictions (DOI
+[10.48620/97774](https://doi.org/10.48620/97774)) and from IGS products, which are credited
+above; please credit them too when you use it. CODE publishes its products as open access but
+states no licence for them; until it does, treat that part of the provenance as unconfirmed if
+licensing matters to you.
