@@ -44,6 +44,11 @@ pub struct Options {
     /// IERS Bulletin A (file or URL) for Earth rotation beyond the IGS values; "none" to
     /// extrapolate the IGS values with their last length of day instead.
     pub eop: String,
+    /// Build the 48 h tracks from the satellites' broadcast orbits known at this GPS time, which
+    /// is also where the prediction starts, instead of from an IGS ultra-rapid orbit.
+    pub from_broadcast: Option<f64>,
+    /// Length of the broadcast-built arc, hours.
+    pub arc_hours: f64,
 }
 
 pub const BULLETIN_A: &str = "https://datacenter.iers.org/data/latestVersion/bulletinA.txt";
@@ -95,11 +100,11 @@ fn rac(x: V3, v: V3) -> M3 {
 }
 
 fn predict_sat(sv: u8, tr: &Track, recs: &[Nav], eo: &EarthOrientation, t_end: f64, warm: Option<FitState>,
-               forces: Forces, clock_model: ClockModel, history: &[(f64, f64)]) -> Option<SatResult> {
+               forces: Forces, clock_model: ClockModel, history: &[(f64, f64)], from_broadcast: bool) -> Option<SatResult> {
     let start = std::time::Instant::now();
     let ts = &tr.ts;
     let n = ts.len();
-    let pred_start = tr.predicted.iter().position(|&p| p).map(|k| ts[k]).unwrap_or(ts[n / 2]);
+    let pred_start = tr.predicted.iter().position(|&p| p).map(|k| ts[k]).unwrap_or(ts[n - 1]);
     let model = Orbit::with(eo, ts[0], forces);
     let xg: Vec<V3> = ts.iter().zip(&tr.xs).map(|(&t, &x)| mtv(&eo.c2t(t), x)).collect();
     let (ts_fit, xg_fit) = (&ts[..], &xg[..]);
@@ -116,6 +121,8 @@ fn predict_sat(sv: u8, tr: &Track, recs: &[Nav], eo: &EarthOrientation, t_end: f
     if started != "warm" { fit = Some(model.fit(ts_fit, xg_fit, None)); }
     let (state, srp, fit_rms, iterations, converged) = fit.unwrap();
 
+    let grid: Vec<f64> = (0..).map(|i| ts[0] + 300.0 * i as f64).take_while(|&t| t <= t_end + STEP + 1.0).collect();
+    let xe: Vec<V3> = model.propagate(&state, &srp, &grid).iter().zip(&grid).map(|(x, &t)| mv(&eo.c2t(t), *x)).collect();
     // Calibration over the measured day: where the broadcasts put the satellite and its clock,
     // relative to the IGS centre of mass and clock.
     let (mut d_rac, mut d_clk): (Vec<V3>, Vec<f64>) = (vec![], vec![]);
@@ -123,7 +130,11 @@ fn predict_sat(sv: u8, tr: &Track, recs: &[Nav], eo: &EarthOrientation, t_end: f
         if tr.predicted[k] { continue; }
         let Some(b) = nearest(recs, ts[k]) else { continue };
         let v = scale(sub(tr.xs[k + 1], tr.xs[k - 1]), 1.0 / (ts[k + 1] - ts[k - 1]));
-        d_rac.push(mv(&rac(tr.xs[k], v), sub(lnav::sat_pos(&b.p, b.toe_abs, ts[k]), tr.xs[k])));
+        // Against the IGS orbit (centre of mass) when there is one. Built from broadcasts, the
+        // track is itself at the antenna, which no orbit can follow; the fitted orbit settles on
+        // the centre of mass, so measure the offset against that instead (it was +1.4 m radial).
+        let reference = if from_broadcast { xe[((ts[k] - grid[0]) / 300.0).round() as usize] } else { tr.xs[k] };
+        d_rac.push(mv(&rac(reference, v), sub(lnav::sat_pos(&b.p, b.toe_abs, ts[k]), reference)));
         if !tr.cs[k].is_nan() { d_clk.push(b.clock(ts[k]) - tr.cs[k]); }
     }
     if d_rac.len() < 10 { return None; }
@@ -160,8 +171,6 @@ fn predict_sat(sv: u8, tr: &Track, recs: &[Nav], eo: &EarthOrientation, t_end: f
         Box::new(move |dt: f64| (c0 + c1 * dt, c1))
     };
 
-    let grid: Vec<f64> = (0..).map(|i| ts[0] + 300.0 * i as f64).take_while(|&t| t <= t_end + STEP + 1.0).collect();
-    let xe: Vec<V3> = model.propagate(&state, &srp, &grid).iter().zip(&grid).map(|(x, &t)| mv(&eo.c2t(t), *x)).collect();
 
     let mut records = Vec::new();
     let mut toe = (pred_start / STEP).ceil() * STEP;
@@ -326,11 +335,13 @@ pub fn run(o: &Options) -> Result<(), String> {
     let now = now_gps();
     let (sp3_src, erp_src) = match (&o.sp3, &o.erp) {
         (Some(s), Some(e)) => (s.clone(), e.clone()),
+        (None, None) if o.from_broadcast.is_some() => return Err("--from-broadcast needs --erp (and --rinex)".into()),
         (None, None) => latest_igu(now)?,
+        (None, Some(e)) if o.from_broadcast.is_some() => (String::new(), e.clone()),
         _ => return Err("--sp3 and --erp go together".into()),
     };
-    eprintln!("orbit: {sp3_src}\nERP:   {erp_src}");
-    let sp3 = read_sp3(&read_text(&sp3_src)?);
+    eprintln!("orbit: {}\nERP:   {erp_src}", if o.from_broadcast.is_some() { "broadcast orbits" } else { &sp3_src });
+    let mut sp3 = if o.from_broadcast.is_some() { BTreeMap::new() } else { read_sp3(&read_text(&sp3_src)?) };
     let erp_text = read_text(&erp_src)?;
     let igs_erp = read_erp(&erp_text)?;
     let mut erp = extrapolate(&igs_erp, last_lod(&erp_text));
@@ -345,9 +356,10 @@ pub fn run(o: &Options) -> Result<(), String> {
         }
     }
     eprintln!("Earth rotation: {eop_used}");
-    if sp3.is_empty() { return Err("no GPS satellites in the orbit file".into()); }
-    let t0 = sp3.values().map(|t| t.ts[0]).fold(f64::INFINITY, f64::min);
-    let t_arc_end = sp3.values().map(|t| *t.ts.last().unwrap()).fold(f64::NEG_INFINITY, f64::max);
+    let t0 = if let Some(ps) = o.from_broadcast { ps - o.arc_hours * 3600.0 } else {
+        if sp3.is_empty() { return Err("no GPS satellites in the orbit file".into()); }
+        sp3.values().map(|t| t.ts[0]).fold(f64::INFINITY, f64::min)
+    };
 
     let (warm, history) = o.warm.as_deref().map(read_warm).unwrap_or_default();
     // Broadcast history for the clock fit comes from the previous run when it has it; otherwise
@@ -372,9 +384,30 @@ pub fn run(o: &Options) -> Result<(), String> {
         }
     }
     eprintln!("broadcasts:\n  {}", used.join("\n  "));
+    if let Some(ps) = o.from_broadcast {
+        // tracks from the broadcast orbits a receiver could have had by ps: a record is uploaded
+        // and broadcast from about two hours before its reference time
+        for (sv, recs) in &navs {
+            let known: Vec<&Nav> = recs.iter().filter(|r| r.toe_abs <= ps + 7200.0 && r.health == 0.0).collect();
+            let mut tr = Track::default();
+            let nk = (o.arc_hours * 4.0).round() as usize;
+            for k in 0..=nk {
+                let t = ps - o.arc_hours * 3600.0 + 900.0 * k as f64;
+                let Some(r) = known.iter().filter(|r| (r.toe_abs - t).abs() <= 7200.0)
+                    .min_by(|a, b| (a.toe_abs - t).abs().partial_cmp(&(b.toe_abs - t).abs()).unwrap()) else { continue };
+                tr.ts.push(t);
+                tr.xs.push(crate::lnav::sat_pos(&r.p, r.toe_abs, t));
+                tr.cs.push(r.clock(t));
+                tr.predicted.push(false);
+            }
+            if tr.ts.len() as f64 >= 0.75 * nk as f64 { sp3.insert(*sv, tr); }
+        }
+        if sp3.is_empty() { return Err("no broadcast orbits cover the 48 h before --from-broadcast".into()); }
+    }
+    let t_arc_end = sp3.values().map(|t| *t.ts.last().unwrap()).fold(f64::NEG_INFINITY, f64::max);
 
-    let pred_start = sp3.values().filter_map(|t| t.predicted.iter().position(|&p| p).map(|k| t.ts[k]))
-        .fold(f64::INFINITY, f64::min);
+    let pred_start = o.from_broadcast.unwrap_or_else(|| sp3.values()
+        .filter_map(|t| t.predicted.iter().position(|&p| p).map(|k| t.ts[k])).fold(f64::INFINITY, f64::min));
     let t_end = pred_start + o.days * 86400.0;
     let warm_t0 = warm.values().map(|w| w.t0).fold(t0, f64::min);
     let eo = EarthOrientation::new(&erp, warm_t0, t_end + STEP);
@@ -391,7 +424,7 @@ pub fn run(o: &Options) -> Result<(), String> {
                 if i >= jobs.len() { break; }
                 let (sv, tr) = jobs[i];
                 if let Some(r) = predict_sat(sv, tr, &navs[&sv], &eo, t_end, warm.get(&sv).copied(), o.forces, o.clock,
-                                             history.get(&sv).map_or(&[][..], |v| &v[..])) {
+                                             history.get(&sv).map_or(&[][..], |v| &v[..]), o.from_broadcast.is_some()) {
                     results.lock().unwrap().insert(sv, r);
                 }
             });
@@ -402,6 +435,17 @@ pub fn run(o: &Options) -> Result<(), String> {
 
     let mut entries: Vec<(u8, Nav)> = results.iter().flat_map(|(sv, r)| r.records.iter().map(|(_, n)| (*sv, n.clone()))).collect();
     entries.sort_by(|a, b| a.1.toc_abs.partial_cmp(&b.1.toc_abs).unwrap().then(a.0.cmp(&b.0)));
+    // A record that will not encode (a clock rate beyond the broadcast range, say, after a bad
+    // fit) is dropped and reported; one odd satellite must never stop the whole publication.
+    let before = entries.len();
+    let mut dropped: Vec<String> = vec![];
+    entries.retain(|(sv, n)| match (casic::gpseph_payload(n, *sv), crate::ubx::gpseph_payload(n, *sv)) {
+        (Ok(_), Ok(_)) => true,
+        (Err(e), _) | (_, Err(e)) => { dropped.push(format!("G{sv:02} {}: {e}", iso_utc(n.toe_abs))); false }
+    });
+    if !dropped.is_empty() {
+        eprintln!("dropped {} of {before} records that would not encode:\n  {}", dropped.len(), dropped.join("\n  "));
+    }
     let mut blob = Vec::new();
     for (sv, n) in &entries { blob.extend(casic::gpseph_frame(n, *sv)?); }
     casic::check_frames(&blob)?;
@@ -457,6 +501,7 @@ pub fn run(o: &Options) -> Result<(), String> {
   "igs_prediction_until": "{ipu}",
   "satellites": [{sats}],
   "records": {nrec},
+  "dropped_records": {ndrop},
   "casic_bytes": {nb},
   "ubx_bytes": {nub},
   "force_model_fit_m": {{"median": {fm:.4}, "worst": {fw:.4}}},
@@ -468,7 +513,7 @@ pub fn run(o: &Options) -> Result<(), String> {
 }}
 "#, made = iso_utc(now), bc = used.iter().map(|u| format!("\"{u}\"")).collect::<Vec<_>>().join(", "),
         ps = iso_utc(pred_start), vu = iso_utc(t_end), ipu = iso_utc(t_arc_end), sats = sats.join(", "),
-        nrec = entries.len(), nb = blob.len(), nub = ublob.len(), fm = median(&mut fits), fw = worst_fit,
+        nrec = entries.len(), ndrop = dropped.len(), nb = blob.len(), nub = ublob.len(), fm = median(&mut fits), fw = worst_fit,
         cold = count("cold"), warm_ = count("warm"), rej = count("warm-rejected"),
         nc = results.values().filter(|r| !r.converged).count(), im = median(&mut iters),
         sm = median(&mut secs.clone()), st = secs.iter().sum::<f64>(), rs = t_run.elapsed().as_secs_f64(),

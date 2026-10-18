@@ -94,7 +94,8 @@ aside). The first version, in Python, took 5.6 minutes for identical results.
 Other options: `--sp3 FILE|URL --erp FILE|URL` and `--rinex FILE|URL ...` to predict from given
 files, `--eop FILE|URL|none` (Bulletin A; default the latest from the IERS), `--days N`, `--jobs N`,
 and for experiments `--clock line|harmonic|harmonic-drift|broadcast-line:DAYS|broadcast-quad:DAYS`,
-`--srp-sigma S1,...,S9`, `--no-tides` and `--no-relativity`. `extended-ephemeris grade PREDICTED.rnx BROADCAST.rnx.gz ...`
+`--srp-sigma S1,...,S9`, `--no-tides`, `--no-relativity`, and `--from-broadcast TIME [--arc-hours H]`
+(predict from broadcast orbits, no IGS orbit; needs `--erp` and `--rinex`). `extended-ephemeris grade PREDICTED.rnx BROADCAST.rnx.gz ...`
 grades a prediction against what the satellites broadcast, and `extended-ephemeris clock-backtest
 BROADCAST.rnx.gz ...` tests clock models over any span of broadcast history (BKG keeps a week of daily files at
 `https://igs.bkg.bund.de/root_ftp/IGS/BRDC/<year>/<day>/BRDC00WRD_S_<year><day>0000_01D_MN.rnx.gz`).
@@ -131,7 +132,10 @@ The branch holds only the latest files:
 
 ## Limits
 
-- GPS only: the IGS ultra-rapid orbit has no BeiDou or Galileo. (MGEX products do; not yet used.)
+- GPS only: the IGS ultra-rapid orbit has no BeiDou or Galileo, and multi-GNSS ultra-rapid orbits
+  are not anonymously available. `--from-broadcast` builds the arc from broadcast orbits instead,
+  which carry every constellation, for roughly twice the median error
+  ([results](results/2026-10-18-broadcast-only.md)); the way to Galileo and BeiDou.
 - One backtest, 4.7 days. Days 5-7 are extrapolated.
 - Satellites that manoeuvre during the week will be wrong until the next run; the receiver still
   recovers by downloading their real orbit data.

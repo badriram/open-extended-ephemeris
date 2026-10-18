@@ -64,7 +64,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
 }
 
 /// "2026-10-18T12:00:00Z" (UTC) -> GPS seconds.
-fn parse_iso(s: &str) -> Result<f64, String> {
+pub fn parse_iso(s: &str) -> Result<f64, String> {
     let f: Vec<f64> = s.trim_end_matches('Z').split(|c| c == '-' || c == 'T' || c == ':' || c == ' ')
         .filter_map(|x| x.parse().ok()).collect();
     if f.len() < 5 { return Err(format!("--at {s}: use YYYY-MM-DDTHH:MM[:SS]Z (UTC)")); }
