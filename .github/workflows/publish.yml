@@ -1,10 +1,12 @@
 # Publish a week of predicted GPS orbit data to the ephemeris-data branch:
 #   https://raw.githubusercontent.com/badriram/open-extended-ephemeris/ephemeris-data/gps-7d.rnx
 #   .../gps-7d-casic.bin   .../gps-7d.json   .../fit-state.txt
-# Manual only for now. When scheduled, run after each IGS ultra-rapid issue (00, 06, 12, 18 UTC,
-# about three hours late), e.g.  schedule: [{cron: "30 4,10,16,22 * * *"}]
+# Runs after each IGS ultra-rapid issue (00, 06, 12, 18 UTC, published about three hours late),
+# and by hand. A run takes a few seconds of computing; most of it is downloading.
 name: publish
 on:
+  schedule:
+    - cron: "30 4,10,16,22 * * *"
   workflow_dispatch:
 permissions:
   contents: write

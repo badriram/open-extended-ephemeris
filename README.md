@@ -103,8 +103,14 @@ the receiver accepts injected orbit data and cold-starts in ~6 s with it. Other 
 
 ## Publishing
 
-`.github/workflows/publish.yml` publishes the four files to the `ephemeris-data` branch. It is
-manual for now; with runs of seconds it can follow each IGS issue, four times a day.
+`.github/workflows/publish.yml` publishes the four files to the `ephemeris-data` branch four times
+a day, about 4.5 hours after each IGS ultra-rapid issue (04:30, 10:30, 16:30 and 22:30 UTC). Each
+run starts from the previous one's `fit-state.txt`, so it downloads only the newest broadcasts.
+The branch holds only the latest files:
+
+- `https://raw.githubusercontent.com/badriram/open-extended-ephemeris/ephemeris-data/gps-7d.rnx`
+- `https://raw.githubusercontent.com/badriram/open-extended-ephemeris/ephemeris-data/gps-7d-casic.bin`
+- `https://raw.githubusercontent.com/badriram/open-extended-ephemeris/ephemeris-data/gps-7d.json`
 
 ## Limits
 
