@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! extended-ephemeris: offline rapid cold start for GPS. Predicts the satellites' orbit data a
 //! week ahead from IGS ultra-rapid orbits and writes it as RINEX 3 and CASIC frames.
+mod boxwing;
 mod casic;
 mod clockbt;
 mod dop853;
@@ -82,6 +83,8 @@ fn parse(args: &[String]) -> Result<predict::Options, String> {
             "--no-tides" => { o.forces.tides = false; i += 1; }
             "--eop" => { o.eop = val(i)?; i += 2; }
             "--no-relativity" => { o.forces.relativity = false; i += 1; }
+            "--box-wing" => { o.forces.box_wing = true; i += 1; }
+            "--no-antenna-offset" => { o.forces.antenna_offset = false; i += 1; }
             "--systems" => {
                 o.systems = val(i)?.split(',').filter_map(|x| x.trim().chars().next()).collect();
                 if o.systems.iter().any(|c| *c != 'G' && *c != 'E') { return Err("--systems: G and/or E".into()); }

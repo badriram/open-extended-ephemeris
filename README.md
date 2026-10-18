@@ -94,7 +94,8 @@ aside). The first version, in Python, took 5.6 minutes for identical results.
 Other options: `--sp3 FILE|URL --erp FILE|URL` and `--rinex FILE|URL ...` to predict from given
 files, `--eop FILE|URL|none` (Bulletin A; default the latest from the IERS), `--days N`, `--jobs N`,
 and for experiments `--clock line|harmonic|harmonic-drift|broadcast-line:DAYS|broadcast-quad:DAYS`,
-`--srp-sigma S1,...,S9`, `--no-tides`, `--no-relativity`, `--systems G,E` (add Galileo), and
+`--srp-sigma S1,...,S9`, `--no-tides`, `--no-relativity`, `--systems G,E` (add Galileo), `--box-wing`
+(a priori Galileo radiation pressure from GSC metadata), `--no-antenna-offset`, and
 `--from-broadcast TIME [--arc-hours H]`
 (predict from broadcast orbits, no IGS orbit; needs `--erp` and `--rinex`). `extended-ephemeris grade PREDICTED.rnx BROADCAST.rnx.gz ...`
 grades a prediction against what the satellites broadcast, and `extended-ephemeris clock-backtest
@@ -149,6 +150,8 @@ The branch holds only the latest files:
   for the solid Earth tide.
 - [IGS](https://igs.org/) ultra-rapid orbits and Earth rotation parameters, and merged broadcast
   ephemeris, via [BKG](https://igs.bkg.bund.de/). NASA CDDIS archives the same products.
+- The European GNSS Service Centre's Galileo satellite metadata (geometry, optical properties,
+  attitude, mass) for the box-wing model.
 - [ERFA](https://github.com/liberfa/erfa) 2.0.1, the open copy of the IAU's SOFA routines; the 37
   files used are vendored unmodified in `vendor/erfa` under its BSD-3-Clause licence.
 - The DOP853 coefficients of Hairer, Nørsett and Wanner, as tabulated in SciPy.

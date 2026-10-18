@@ -45,20 +45,27 @@ pub fn sunlit(r: V3, sun: V3) -> f64 {
 
 /// Which optional forces to include (all on by default; switches exist to measure each).
 #[derive(Clone, Copy)]
-pub struct Forces { pub tides: bool, pub relativity: bool, pub srp_sigma: [f64; NSRP] }
+pub struct Forces { pub tides: bool, pub relativity: bool, pub srp_sigma: [f64; NSRP], pub box_wing: bool, pub antenna_offset: bool }
 
 impl Default for Forces {
-    fn default() -> Self { Forces { tides: true, relativity: true, srp_sigma: SRP_SIGMA_ECOM2 } }
+    fn default() -> Self { Forces { tides: true, relativity: true, srp_sigma: SRP_SIGMA_ECOM2, box_wing: false, antenna_offset: true } }
 }
 
 pub struct Orbit<'a> {
     pub eo: &'a EarthOrientation,
     pub t0: f64,
     pub forces: Forces,
+    /// An a priori radiation-pressure model (Galileo); the ECOM terms then fit what it misses.
+    pub box_wing: Option<crate::boxwing::BoxWing>,
+    /// Fit a constant radial offset between the orbit and the track: on for tracks built from
+    /// broadcast orbits, which describe the antenna (~1 m Earthward of the centre of mass). An
+    /// orbit cannot follow a radially shifted point at the true angular rate; without this term
+    /// the fit bought the radius with a wrong period, worth ~70 m along-track by day 5 (Galileo).
+    pub fit_antenna_offset: bool,
 }
 
 impl<'a> Orbit<'a> {
-    pub fn with(eo: &'a EarthOrientation, t0: f64, forces: Forces) -> Orbit<'a> { Orbit { eo, t0, forces } }
+    pub fn with(eo: &'a EarthOrientation, t0: f64, forces: Forces) -> Orbit<'a> { Orbit { eo, t0, forces, box_wing: None, fit_antenna_offset: false } }
 
     pub fn accel(&self, t: f64, r: V3, v: V3, p: &Srp) -> V3 {
         let m = self.eo.c2t(t);
@@ -82,6 +89,7 @@ impl<'a> Orbit<'a> {
             a = add(a, scale(sub(scale(d, 1.0 / (dn * dn * dn)), scale(s, 1.0 / (sn * sn * sn))), gm));
         }
         let lit = sunlit(r, sun);
+        if let Some(bw) = &self.box_wing { a = add(a, bw.accel(r, sun, lit)); }
         if lit > 0.0 {
             let ss = unit(sun);
             let e_d = unit(sub(sun, r));
@@ -152,31 +160,33 @@ impl<'a> Orbit<'a> {
     /// under 0.1 mm. `start` changes how quickly the fit gets there, not where.
     /// Returns (state, srp, rms m, iterations, converged).
     pub fn fit(&self, ts: &[f64], xs: &[V3], start: Option<(State, Srp)>) -> (State, Srp, f64, usize, bool) {
-        let mut steps = [10.0; NP];
+        const NQ: usize = NP + 1;                       // + the radial antenna offset, m
+        let mut steps = [10.0; NQ];
+        steps[NP] = 0.1;
         for j in 3..6 { steps[j] = 1e-2; }
-        let mut p = [0.0; NP];
+        let mut p = [0.0; NQ];
         match start {
-            Some((st, q)) => { p[..6].copy_from_slice(&st); p[6..].copy_from_slice(&q); }
+            Some((st, q)) => { p[..6].copy_from_slice(&st); p[6..NP].copy_from_slice(&q); }
             None => {
                 let v0 = scale(sub(lagrange(ts, xs, ts[0] + 1.0, 10), lagrange(ts, xs, ts[0] - 1.0, 10)), 0.5);
                 p[..3].copy_from_slice(&xs[0]);
                 p[3..6].copy_from_slice(&v0);
-                p[6..].copy_from_slice(&SRP_PRIOR_MEAN);
+                p[6..NP].copy_from_slice(&SRP_PRIOR_MEAN);
             }
         }
         let sig = self.forces.srp_sigma;
-        let lam: Vec<f64> = (0..NP).map(|j| if j < 6 { 0.0 } else { 1.0 / sig[j - 6].powi(2) }).collect();
-        let prior: Vec<f64> = (0..NP).map(|j| if j < 6 { 0.0 } else { SRP_PRIOR_MEAN[j - 6] }).collect();
-        let split = |q: &[f64; NP]| -> (State, Srp) {
+        let lam: Vec<f64> = (0..NQ).map(|j| if j < 6 { 0.0 } else if j == NP { if self.fit_antenna_offset { 0.0 } else { 1e12 } } else { 1.0 / sig[j - 6].powi(2) }).collect();
+        let prior: Vec<f64> = (0..NQ).map(|j| if j < 6 || j == NP { 0.0 } else { SRP_PRIOR_MEAN[j - 6] }).collect();
+        let split = |q: &[f64; NQ]| -> (State, Srp) {
             let mut st = [0.0; 6]; let mut r = [0.0; NSRP];
-            st.copy_from_slice(&q[..6]); r.copy_from_slice(&q[6..]); (st, r)
+            st.copy_from_slice(&q[..6]); r.copy_from_slice(&q[6..NP]); (st, r)
         };
-        let resid = |q: &[f64; NP]| -> Vec<f64> {
+        let resid = |q: &[f64; NQ]| -> Vec<f64> {
             let (st, r) = split(q);
-            self.propagate(&st, &r, ts).iter().zip(xs).flat_map(|(a, b)| sub(*a, *b)).collect()
+            self.propagate(&st, &r, ts).iter().zip(xs).flat_map(|(a, b)| sub(add(*a, scale(unit(*a), q[NP])), *b)).collect()
         };
-        let cost = |q: &[f64; NP], res: &[f64]| -> f64 {
-            res.iter().map(|x| x * x).sum::<f64>() + (0..NP).map(|j| lam[j] * (q[j] - prior[j]).powi(2)).sum::<f64>()
+        let cost = |q: &[f64; NQ], res: &[f64]| -> f64 {
+            res.iter().map(|x| x * x).sum::<f64>() + (0..NQ).map(|j| lam[j] * (q[j] - prior[j]).powi(2)).sum::<f64>()
         };
         let mut res = resid(&p);
         let mut c = cost(&p, &res);
@@ -185,33 +195,33 @@ impl<'a> Orbit<'a> {
         while it < 25 {
             it += 1;
             // Jacobian, column by column
-            let mut jac = vec![0.0; n * NP];
-            for j in 0..NP {
+            let mut jac = vec![0.0; n * NQ];
+            for j in 0..NQ {
                 let mut q = p;
                 q[j] += steps[j];
                 let r2 = resid(&q);
-                for i in 0..n { jac[i * NP + j] = (r2[i] - res[i]) / steps[j]; }
+                for i in 0..n { jac[i * NQ + j] = (r2[i] - res[i]) / steps[j]; }
             }
             // Scale every unknown to unit effect (velocity partials are ~1e5 times position ones).
-            let d: Vec<f64> = (0..NP).map(|j| (0..n).map(|i| jac[i * NP + j].powi(2)).sum::<f64>().sqrt()).collect();
-            let mut nm = vec![0.0; NP * NP];
-            let mut g = vec![0.0; NP];
-            for a in 0..NP {
-                for b in 0..NP {
-                    nm[a * NP + b] = (0..n).map(|i| jac[i * NP + a] * jac[i * NP + b]).sum::<f64>() / (d[a] * d[b]);
+            let d: Vec<f64> = (0..NQ).map(|j| (0..n).map(|i| jac[i * NQ + j].powi(2)).sum::<f64>().sqrt()).collect();
+            let mut nm = vec![0.0; NQ * NQ];
+            let mut g = vec![0.0; NQ];
+            for a in 0..NQ {
+                for b in 0..NQ {
+                    nm[a * NQ + b] = (0..n).map(|i| jac[i * NQ + a] * jac[i * NQ + b]).sum::<f64>() / (d[a] * d[b]);
                 }
-                nm[a * NP + a] += lam[a] / (d[a] * d[a]);
-                g[a] = (0..n).map(|i| jac[i * NP + a] * res[i]).sum::<f64>() / d[a] + lam[a] * (p[a] - prior[a]) / d[a];
+                nm[a * NQ + a] += lam[a] / (d[a] * d[a]);
+                g[a] = (0..n).map(|i| jac[i * NQ + a] * res[i]).sum::<f64>() / d[a] + lam[a] * (p[a] - prior[a]) / d[a];
             }
             let mut moved;
             loop {
                 let mut damped = nm.clone();
-                for a in 0..NP { damped[a * NP + a] += mu * nm[a * NP + a]; }
-                let step = solve(NP, &damped, &g.iter().map(|x| -x).collect::<Vec<_>>());
-                let dp: Vec<f64> = (0..NP).map(|j| step[j] / d[j]).collect();
-                moved = (0..n).map(|i| (0..NP).map(|j| jac[i * NP + j] * dp[j]).sum::<f64>().abs()).fold(0.0, f64::max);
+                for a in 0..NQ { damped[a * NQ + a] += mu * nm[a * NQ + a]; }
+                let step = solve(NQ, &damped, &g.iter().map(|x| -x).collect::<Vec<_>>());
+                let dp: Vec<f64> = (0..NQ).map(|j| step[j] / d[j]).collect();
+                moved = (0..n).map(|i| (0..NQ).map(|j| jac[i * NQ + j] * dp[j]).sum::<f64>().abs()).fold(0.0, f64::max);
                 let mut q = p;
-                for j in 0..NP { q[j] += dp[j]; }
+                for j in 0..NQ { q[j] += dp[j]; }
                 let rq = resid(&q);
                 let cq = cost(&q, &rq);
                 if cq <= c {

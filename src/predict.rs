@@ -108,7 +108,12 @@ fn predict_sat(sv: u8, tr: &Track, recs: &[Nav], eo: &EarthOrientation, t_end: f
     let ts = &tr.ts;
     let n = ts.len();
     let pred_start = tr.predicted.iter().position(|&p| p).map(|k| ts[k]).unwrap_or(ts[n - 1]);
-    let model = Orbit::with(eo, ts[0], forces);
+    let galileo_bw = || if forces.box_wing && crate::rinex::sat_sys(sv) == 'E' {
+        Some(crate::boxwing::BoxWing::for_galileo(crate::rinex::sat_prn(sv)))
+    } else { None };
+    let mut model = Orbit::with(eo, ts[0], forces);
+    model.box_wing = galileo_bw();
+    model.fit_antenna_offset = tr.from_broadcast && forces.antenna_offset;
     let xg: Vec<V3> = ts.iter().zip(&tr.xs).map(|(&t, &x)| mtv(&eo.c2t(t), x)).collect();
     let (ts_fit, xg_fit) = (&ts[..], &xg[..]);
 
@@ -116,7 +121,11 @@ fn predict_sat(sv: u8, tr: &Track, recs: &[Nav], eo: &EarthOrientation, t_end: f
     let mut fit = None;
     if let Some(w) = warm {
         // The previous run's state, carried forward to this arc's start with its own forces.
-        let y0 = if w.t0 < ts[0] { Orbit::with(eo, w.t0, forces).propagate_states(&w.state, &w.srp, &[ts[0]])[0] } else { w.state };
+        let y0 = if w.t0 < ts[0] {
+            let mut prev = Orbit::with(eo, w.t0, forces);
+            prev.box_wing = galileo_bw();
+            prev.propagate_states(&w.state, &w.srp, &[ts[0]])[0]
+        } else { w.state };
         let f = model.fit(ts_fit, xg_fit, Some((y0, w.srp)));
         started = if f.2 > WARM_MAX_RMS || !f.4 { "warm-rejected" } else { "warm" };
         fit = Some(f);
