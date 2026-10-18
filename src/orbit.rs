@@ -18,11 +18,17 @@ pub const STEP: f64 = 100.0;
 
 /// A priori radiation-pressure terms, nm/s²: D0 (along the Sun direction) is left free; the
 /// others are usually a few nm/s² for GPS and are held near zero unless the data insists.
-pub const SRP_PRIOR_MEAN: [f64; 5] = [-100.0, 0.0, 0.0, 0.0, 0.0];
-pub const SRP_PRIOR_SIGMA: [f64; 5] = [1e6, 2.0, 5.0, 5.0, 5.0];
+/// Terms, nm/s²: D0 Y0 B0 Bc Bs (ECOM1) and D2c D2s D4c D4s (the extra ECOM2 terms along the Sun
+/// direction, twice and four times per revolution).
+pub const NSRP: usize = 9;
+pub const SRP_PRIOR_MEAN: [f64; NSRP] = [-100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+/// A priori sigmas: ECOM2 (all nine terms; the default). In two backtests it cut the day-4-5 orbit
+/// error by 6-11% against ECOM1; looser or tighter priors did not help.
+pub const SRP_SIGMA_ECOM2: [f64; NSRP] = [1e6, 2.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0];
+const NP: usize = 6 + NSRP;
 
 pub type State = [f64; 6];
-pub type Srp = [f64; 5];
+pub type Srp = [f64; NSRP];
 
 /// Fraction of sunlight reaching a satellite: 1 in sunlight, 0 in Earth's umbra, and a smooth
 /// ramp across the penumbra (~190 km wide at GPS distance).
@@ -39,9 +45,11 @@ pub fn sunlit(r: V3, sun: V3) -> f64 {
 
 /// Which optional forces to include (all on by default; switches exist to measure each).
 #[derive(Clone, Copy)]
-pub struct Forces { pub tides: bool }
+pub struct Forces { pub tides: bool, pub relativity: bool, pub srp_sigma: [f64; NSRP] }
 
-impl Default for Forces { fn default() -> Self { Forces { tides: true } } }
+impl Default for Forces {
+    fn default() -> Self { Forces { tides: true, relativity: true, srp_sigma: SRP_SIGMA_ECOM2 } }
+}
 
 pub struct Orbit<'a> {
     pub eo: &'a EarthOrientation,
@@ -59,6 +67,15 @@ impl<'a> Orbit<'a> {
             solid_tide(&[(mv(&m, sun), GM_SUN), (mv(&m, moon), GM_MOON)])
         } else { ([0.0; 3], [0.0; 3]) };
         let mut a = mtv(&m, gravity_tide(mv(&m, r), &dc, &ds));
+        if self.forces.relativity {
+            // Schwarzschild term, IERS Conventions 2010 eq. 10.12 (the Lense-Thirring and de Sitter
+            // terms are far smaller for GPS)
+            const C2: f64 = 299792458.0 * 299792458.0;
+            let gm = crate::gravity::GM;
+            let rn = norm(r);
+            let k = gm / (C2 * rn * rn * rn);
+            a = add(a, scale(add(scale(r, 4.0 * gm / rn - dot(v, v)), scale(v, 4.0 * dot(r, v))), k));
+        }
         for (s, gm) in [(sun, GM_SUN), (moon, GM_MOON)] {
             let d = sub(s, r);
             let (dn, sn) = (norm(d), norm(s));
@@ -75,8 +92,9 @@ impl<'a> Orbit<'a> {
             let sp = unit(sub(ss, scale(h, dot(ss, h))));
             let u = dot(cross(sp, e_r), h).atan2(dot(sp, e_r));
             let bt = p[2] + p[3] * u.cos() + p[4] * u.sin();
+            let dt = p[0] + p[5] * (2.0 * u).cos() + p[6] * (2.0 * u).sin() + p[7] * (4.0 * u).cos() + p[8] * (4.0 * u).sin();
             let f = 1e-9 * lit;
-            a = add(a, scale(add(add(scale(e_d, p[0]), scale(e_y, p[1])), scale(e_b, bt)), f));
+            a = add(a, scale(add(add(scale(e_d, dt), scale(e_y, p[1])), scale(e_b, bt)), f));
         }
         a
     }
@@ -134,10 +152,11 @@ impl<'a> Orbit<'a> {
     /// under 0.1 mm. `start` changes how quickly the fit gets there, not where.
     /// Returns (state, srp, rms m, iterations, converged).
     pub fn fit(&self, ts: &[f64], xs: &[V3], start: Option<(State, Srp)>) -> (State, Srp, f64, usize, bool) {
-        const STEPS: [f64; 11] = [10.0, 10.0, 10.0, 1e-2, 1e-2, 1e-2, 10.0, 10.0, 10.0, 10.0, 10.0];
-        let mut p = [0.0; 11];
+        let mut steps = [10.0; NP];
+        for j in 3..6 { steps[j] = 1e-2; }
+        let mut p = [0.0; NP];
         match start {
-            Some((s, q)) => { p[..6].copy_from_slice(&s); p[6..].copy_from_slice(&q); }
+            Some((st, q)) => { p[..6].copy_from_slice(&st); p[6..].copy_from_slice(&q); }
             None => {
                 let v0 = scale(sub(lagrange(ts, xs, ts[0] + 1.0, 10), lagrange(ts, xs, ts[0] - 1.0, 10)), 0.5);
                 p[..3].copy_from_slice(&xs[0]);
@@ -145,18 +164,19 @@ impl<'a> Orbit<'a> {
                 p[6..].copy_from_slice(&SRP_PRIOR_MEAN);
             }
         }
-        let lam: Vec<f64> = (0..11).map(|j| if j < 6 { 0.0 } else { 1.0 / SRP_PRIOR_SIGMA[j - 6].powi(2) }).collect();
-        let prior: Vec<f64> = (0..11).map(|j| if j < 6 { 0.0 } else { SRP_PRIOR_MEAN[j - 6] }).collect();
-        let split = |q: &[f64; 11]| -> (State, Srp) {
-            let mut s = [0.0; 6]; let mut r = [0.0; 5];
-            s.copy_from_slice(&q[..6]); r.copy_from_slice(&q[6..]); (s, r)
+        let sig = self.forces.srp_sigma;
+        let lam: Vec<f64> = (0..NP).map(|j| if j < 6 { 0.0 } else { 1.0 / sig[j - 6].powi(2) }).collect();
+        let prior: Vec<f64> = (0..NP).map(|j| if j < 6 { 0.0 } else { SRP_PRIOR_MEAN[j - 6] }).collect();
+        let split = |q: &[f64; NP]| -> (State, Srp) {
+            let mut st = [0.0; 6]; let mut r = [0.0; NSRP];
+            st.copy_from_slice(&q[..6]); r.copy_from_slice(&q[6..]); (st, r)
         };
-        let resid = |q: &[f64; 11]| -> Vec<f64> {
-            let (s, r) = split(q);
-            self.propagate(&s, &r, ts).iter().zip(xs).flat_map(|(a, b)| sub(*a, *b)).collect()
+        let resid = |q: &[f64; NP]| -> Vec<f64> {
+            let (st, r) = split(q);
+            self.propagate(&st, &r, ts).iter().zip(xs).flat_map(|(a, b)| sub(*a, *b)).collect()
         };
-        let cost = |q: &[f64; 11], res: &[f64]| -> f64 {
-            res.iter().map(|x| x * x).sum::<f64>() + (0..11).map(|j| lam[j] * (q[j] - prior[j]).powi(2)).sum::<f64>()
+        let cost = |q: &[f64; NP], res: &[f64]| -> f64 {
+            res.iter().map(|x| x * x).sum::<f64>() + (0..NP).map(|j| lam[j] * (q[j] - prior[j]).powi(2)).sum::<f64>()
         };
         let mut res = resid(&p);
         let mut c = cost(&p, &res);
@@ -165,33 +185,33 @@ impl<'a> Orbit<'a> {
         while it < 25 {
             it += 1;
             // Jacobian, column by column
-            let mut jac = vec![0.0; n * 11];
-            for j in 0..11 {
+            let mut jac = vec![0.0; n * NP];
+            for j in 0..NP {
                 let mut q = p;
-                q[j] += STEPS[j];
+                q[j] += steps[j];
                 let r2 = resid(&q);
-                for i in 0..n { jac[i * 11 + j] = (r2[i] - res[i]) / STEPS[j]; }
+                for i in 0..n { jac[i * NP + j] = (r2[i] - res[i]) / steps[j]; }
             }
             // Scale every unknown to unit effect (velocity partials are ~1e5 times position ones).
-            let d: Vec<f64> = (0..11).map(|j| (0..n).map(|i| jac[i * 11 + j].powi(2)).sum::<f64>().sqrt()).collect();
-            let mut nm = vec![0.0; 121];
-            let mut g = vec![0.0; 11];
-            for a in 0..11 {
-                for b in 0..11 {
-                    nm[a * 11 + b] = (0..n).map(|i| jac[i * 11 + a] * jac[i * 11 + b]).sum::<f64>() / (d[a] * d[b]);
+            let d: Vec<f64> = (0..NP).map(|j| (0..n).map(|i| jac[i * NP + j].powi(2)).sum::<f64>().sqrt()).collect();
+            let mut nm = vec![0.0; NP * NP];
+            let mut g = vec![0.0; NP];
+            for a in 0..NP {
+                for b in 0..NP {
+                    nm[a * NP + b] = (0..n).map(|i| jac[i * NP + a] * jac[i * NP + b]).sum::<f64>() / (d[a] * d[b]);
                 }
-                nm[a * 11 + a] += lam[a] / (d[a] * d[a]);
-                g[a] = (0..n).map(|i| jac[i * 11 + a] * res[i]).sum::<f64>() / d[a] + lam[a] * (p[a] - prior[a]) / d[a];
+                nm[a * NP + a] += lam[a] / (d[a] * d[a]);
+                g[a] = (0..n).map(|i| jac[i * NP + a] * res[i]).sum::<f64>() / d[a] + lam[a] * (p[a] - prior[a]) / d[a];
             }
             let mut moved;
             loop {
                 let mut damped = nm.clone();
-                for a in 0..11 { damped[a * 11 + a] += mu * nm[a * 11 + a]; }
-                let step = solve(11, &damped, &g.iter().map(|x| -x).collect::<Vec<_>>());
-                let dp: Vec<f64> = (0..11).map(|j| step[j] / d[j]).collect();
-                moved = (0..n).map(|i| (0..11).map(|j| jac[i * 11 + j] * dp[j]).sum::<f64>().abs()).fold(0.0, f64::max);
+                for a in 0..NP { damped[a * NP + a] += mu * nm[a * NP + a]; }
+                let step = solve(NP, &damped, &g.iter().map(|x| -x).collect::<Vec<_>>());
+                let dp: Vec<f64> = (0..NP).map(|j| step[j] / d[j]).collect();
+                moved = (0..n).map(|i| (0..NP).map(|j| jac[i * NP + j] * dp[j]).sum::<f64>().abs()).fold(0.0, f64::max);
                 let mut q = p;
-                for j in 0..11 { q[j] += dp[j]; }
+                for j in 0..NP { q[j] += dp[j]; }
                 let rq = resid(&q);
                 let cq = cost(&q, &rq);
                 if cq <= c {

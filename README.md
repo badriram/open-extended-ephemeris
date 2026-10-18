@@ -40,8 +40,8 @@ Per GPS satellite, with plain physics and least squares (no machine learning):
 1. **Start from the IGS.** The International GNSS Service's ultra-rapid orbit gives 24 h of
    measured positions and clocks and 24 h of its own prediction; BKG serves it anonymously.
 2. **Fit a force model** to those 48 h: Earth's gravity field (EGM2008 to degree and order 4), the
-   Sun and Moon, and solar radiation pressure as five ECOM-style terms with Earth's shadow and a
-   smooth penumbra; Earth orientation from the IAU 2006/2000A model (ERFA) with the IGS's polar
+   Sun and Moon, relativity, and solar radiation pressure as the nine ECOM2 terms with Earth's
+   shadow and a smooth penumbra; Earth orientation from the IAU 2006/2000A model (ERFA) with the IGS's polar
    motion and UT1, continued by IERS Bulletin A's predictions. Fitted by Levenberg-Marquardt, with a priori limits on the minor radiation
    terms, to 0.1-0.26 m RMS.
 3. **Integrate a week ahead** (8th-order Dormand-Prince, fixed 100 s steps, so the result is a
@@ -60,7 +60,11 @@ fixing an Earth-orientation mix of two IAU conventions (0.49° of error), noisy 
 integration and an unconverged fit took the five-day median from 10.6 m to 4.7 m; the clock model
 then took it to 2.2 m. The solid Earth tide and Bulletin A are physically right but changed the
 results by less than the backtests' noise: Earth rotation is not what limits the orbits (even the
-UT1 measured afterwards did no better), the force model is.
+UT1 measured afterwards did no better), the force model is. Of the force model, ECOM2's extra
+radiation-pressure terms cut the five-day orbit error by 6-11%; nothing else tried (relativity,
+gravity to degree 6, the IGS's GM, a finer step, different priors) moved it. The orbit error left
+is almost all along-track, which range error weights about seven times down, so the clocks still
+decide how far out a first fix is.
 
 ## Running it
 
@@ -86,8 +90,8 @@ aside). The first version, in Python, took 5.6 minutes for identical results.
 
 Other options: `--sp3 FILE|URL --erp FILE|URL` and `--rinex FILE|URL ...` to predict from given
 files, `--eop FILE|URL|none` (Bulletin A; default the latest from the IERS), `--days N`, `--jobs N`,
-and for experiments `--clock line|harmonic|harmonic-drift|broadcast-line:DAYS|broadcast-quad:DAYS`
-and `--no-tides`. `extended-ephemeris grade PREDICTED.rnx BROADCAST.rnx.gz ...`
+and for experiments `--clock line|harmonic|harmonic-drift|broadcast-line:DAYS|broadcast-quad:DAYS`,
+`--srp-sigma S1,...,S9`, `--no-tides` and `--no-relativity`. `extended-ephemeris grade PREDICTED.rnx BROADCAST.rnx.gz ...`
 grades a prediction against what the satellites broadcast (BKG keeps a week of daily files at
 `https://igs.bkg.bund.de/root_ftp/IGS/BRDC/<year>/<day>/BRDC00WRD_S_<year><day>0000_01D_MN.rnx.gz`).
 

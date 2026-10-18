@@ -102,17 +102,18 @@ fn predict_sat(sv: u8, tr: &Track, recs: &[Nav], eo: &EarthOrientation, t_end: f
     let pred_start = tr.predicted.iter().position(|&p| p).map(|k| ts[k]).unwrap_or(ts[n / 2]);
     let model = Orbit::with(eo, ts[0], forces);
     let xg: Vec<V3> = ts.iter().zip(&tr.xs).map(|(&t, &x)| mtv(&eo.c2t(t), x)).collect();
+    let (ts_fit, xg_fit) = (&ts[..], &xg[..]);
 
     let mut started = "cold";
     let mut fit = None;
     if let Some(w) = warm {
         // The previous run's state, carried forward to this arc's start with its own forces.
         let y0 = if w.t0 < ts[0] { Orbit::with(eo, w.t0, forces).propagate_states(&w.state, &w.srp, &[ts[0]])[0] } else { w.state };
-        let f = model.fit(ts, &xg, Some((y0, w.srp)));
+        let f = model.fit(ts_fit, xg_fit, Some((y0, w.srp)));
         started = if f.2 > WARM_MAX_RMS || !f.4 { "warm-rejected" } else { "warm" };
         fit = Some(f);
     }
-    if started != "warm" { fit = Some(model.fit(ts, &xg, None)); }
+    if started != "warm" { fit = Some(model.fit(ts_fit, xg_fit, None)); }
     let (state, srp, fit_rms, iterations, converged) = fit.unwrap();
 
     // Calibration over the measured day: where the broadcasts put the satellite and its clock,
@@ -299,9 +300,12 @@ fn read_warm(src: &str) -> (BTreeMap<u8, FitState>, ClockHistory) {
             continue;
         }
         let v: Vec<f64> = line.split_whitespace().filter_map(|x| x.parse().ok()).collect();
-        if v.len() == 14 {
+        // sv t0 state(6) srp(5 or 9) rms
+        if v.len() == 8 + 5 + 1 || v.len() == 8 + crate::orbit::NSRP + 1 {
+            let mut srp = [0.0; crate::orbit::NSRP];
+            for (k, x) in v[8..v.len() - 1].iter().enumerate() { srp[k] = *x; }
             fits.insert(v[0] as u8, FitState { t0: v[1], state: [v[2], v[3], v[4], v[5], v[6], v[7]],
-                                               srp: [v[8], v[9], v[10], v[11], v[12]], rms: v[13] });
+                                               srp, rms: v[v.len() - 1] });
         }
     }
     (fits, clocks)
@@ -413,7 +417,7 @@ pub fn run(o: &Options) -> Result<(), String> {
         base(&sp3_src),
         "github.com/badriram/open-extended-ephemeris  MIT".into(),
     ])).map_err(|e| e.to_string())?;
-    let mut state = String::from("# sv t0 x y z vx vy vz (GCRS m, m/s) D0 Y0 B0 Bc Bs (nm/s^2) rms (m)\n");
+    let mut state = String::from("# sv t0 x y z vx vy vz (GCRS m, m/s) D0 Y0 B0 Bc Bs D2c D2s D4c D4s (nm/s^2) rms (m)\n");
     for (sv, r) in &results {
         let f = &r.fit;
         state += &format!("{sv} {:.3} {} {} {:.6}\n", f.t0,
@@ -433,6 +437,8 @@ pub fn run(o: &Options) -> Result<(), String> {
   "earth_rotation": "{eop_used}",
   "clock_model": "{clock_model:?}",
   "solid_tides": {tides},
+  "relativity": {rel},
+  "srp_prior_sigma_nm_s2": "{srp:?}",
   "broadcasts": [{bc}],
   "prediction_starts": "{ps}",
   "valid_until": "{vu}",
@@ -453,7 +459,7 @@ pub fn run(o: &Options) -> Result<(), String> {
         cold = count("cold"), warm_ = count("warm"), rej = count("warm-rejected"),
         nc = results.values().filter(|r| !r.converged).count(), im = median(&mut iters),
         sm = median(&mut secs.clone()), st = secs.iter().sum::<f64>(), rs = t_run.elapsed().as_secs_f64(),
-        cn = check.0, cm = check.1, cp = check.2, clock_model = o.clock, tides = o.forces.tides);
+        cn = check.0, cm = check.1, cp = check.2, clock_model = o.clock, tides = o.forces.tides, rel = o.forces.relativity, srp = o.forces.srp_sigma);
     std::fs::write(path("gps-7d.json"), &json).map_err(|e| e.to_string())?;
     print!("{json}");
     if check.0 == 0 || !(check.1 <= o.max_check_m) {

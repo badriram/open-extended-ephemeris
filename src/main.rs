@@ -25,7 +25,8 @@ usage:
   extended-ephemeris [predict] [--out DIR] [--days N] [--warm fit-state.txt]
                      [--sp3 FILE|URL --erp FILE|URL] [--rinex FILE|URL ...]
                      [--max-check-m M] [--jobs N] [--clock line|harmonic|harmonic-drift]
-                     [--no-tides] [--eop BULLETIN-A-FILE|URL|none]
+                     [--no-tides] [--no-relativity] [--srp-sigma S1,...,S9]
+                     [--eop BULLETIN-A-FILE|URL|none]
   extended-ephemeris grade PREDICTED.rnx BROADCAST.rnx[.gz] ...
 
 predict (the default) fetches the newest IGS ultra-rapid orbit and the broadcasts it needs from
@@ -68,6 +69,14 @@ fn parse(args: &[String]) -> Result<predict::Options, String> {
             "--jobs" => { o.jobs = val(i)?.parse().map_err(|_| "--jobs: a number")?; i += 2; }
             "--no-tides" => { o.forces.tides = false; i += 1; }
             "--eop" => { o.eop = val(i)?; i += 2; }
+            "--no-relativity" => { o.forces.relativity = false; i += 1; }
+            "--srp-sigma" => {
+                // nine comma-separated a priori sigmas, nm/s²: D0 Y0 B0 Bc Bs D2c D2s D4c D4s
+                let v: Vec<f64> = val(i)?.split(',').filter_map(|x| x.parse().ok()).collect();
+                if v.len() != orbit::NSRP { return Err("--srp-sigma: nine comma-separated numbers".into()); }
+                o.forces.srp_sigma.copy_from_slice(&v);
+                i += 2;
+            }
             "--clock" => {
                 o.clock = match val(i)?.as_str() {
                     "line" => predict::ClockModel::Line,
