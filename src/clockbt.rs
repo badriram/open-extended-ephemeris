@@ -21,6 +21,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut files = vec![];
     let mut models = vec![];
     let mut every = 6.0;
+    let mut system: Option<char> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -31,6 +32,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 }
                 i += 2;
             }
+            "--system" => { system = args.get(i + 1).and_then(|s| s.chars().next()); i += 2; }
             "--every" => { every = args.get(i + 1).ok_or("--every needs hours")?.parse().map_err(|_| "--every: hours")?; i += 2; }
             f => { files.push(f.to_string()); i += 1; }
         }
@@ -47,7 +49,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     // per satellite: healthy records sorted by toe, and (toc, af0) samples
     let sats: Vec<(u8, Vec<crate::rinex::Nav>)> = navs.into_iter()
         .map(|(sv, v)| (sv, v.into_iter().filter(|r| r.health == 0.0).collect::<Vec<_>>()))
-        .filter(|(_, v)| v.len() > 50).collect();
+        .filter(|(sv, v)| v.len() > 50 && system.map_or(true, |c| crate::rinex::sat_sys(*sv) == c)).collect();
     let t_first = sats.iter().map(|(_, v)| v[0].toc_abs).fold(f64::INFINITY, f64::min);
     let t_last = sats.iter().map(|(_, v)| v.last().unwrap().toc_abs).fold(f64::NEG_INFINITY, f64::max);
     let max_days = models.iter().map(|m| m.days).fold(0.0, f64::max);

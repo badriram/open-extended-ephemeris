@@ -49,6 +49,9 @@ pub struct Options {
     pub from_broadcast: Option<f64>,
     /// Length of the broadcast-built arc, hours.
     pub arc_hours: f64,
+    /// Treat orbit-file samples after this GPS time as predicted, whatever their flags (for CODE's
+    /// 5-day prediction, whose flags start minutes after its first epoch).
+    pub prediction_start: Option<f64>,
     /// Constellations to predict: 'G' (from the IGS orbit, or broadcasts with --from-broadcast) and
     /// 'E' (Galileo, always from broadcasts: there is no anonymous multi-GNSS ultra-rapid orbit).
     pub systems: Vec<char>,
@@ -138,8 +141,11 @@ fn predict_sat(sv: u8, tr: &Track, recs: &[Nav], eo: &EarthOrientation, t_end: f
     // Calibration over the measured day: where the broadcasts put the satellite and its clock,
     // relative to the IGS centre of mass and clock.
     let (mut d_rac, mut d_clk): (Vec<V3>, Vec<f64>) = (vec![], vec![]);
+    // Normally the orbit's measured part; an orbit that is all prediction (CODE's 5-day file from
+    // its first epoch) falls back to whatever the broadcasts seen by the run cover.
+    let measured = tr.predicted.iter().filter(|&&p| !p).count() >= 40;
     for k in (1..n - 1).step_by(4) {
-        if tr.predicted[k] { continue; }
+        if if measured { tr.predicted[k] } else { ts[k] > pred_start + LATENCY } { continue; }
         let Some(b) = nearest(recs, ts[k]) else { continue };
         let v = scale(sub(tr.xs[k + 1], tr.xs[k - 1]), 1.0 / (ts[k + 1] - ts[k - 1]));
         // Against the IGS orbit (centre of mass) when there is one. Built from broadcasts, the
@@ -185,7 +191,10 @@ fn predict_sat(sv: u8, tr: &Track, recs: &[Nav], eo: &EarthOrientation, t_end: f
 
 
     let mut records = Vec::new();
-    let mut toe = (pred_start / STEP).ceil() * STEP;
+    // The first record whose whole fit window (toe ± 2 h) the orbit covers. With CODE's 5-day
+    // file, which starts at the prediction start, an earlier toe extrapolated the interpolation
+    // off the start of the data (errors of 40-150 km in the self-check).
+    let mut toe = ((pred_start / STEP).ceil() * STEP).max((ts[0] / STEP).ceil() * STEP + STEP);
     while toe <= t_end {
         let win: Vec<f64> = (0..49).map(|i| toe - 7200.0 + 300.0 * i as f64).collect();
         let pos: Vec<V3> = if *win.last().unwrap() <= ts[n - 1] {
@@ -300,7 +309,12 @@ fn self_check(results: &BTreeMap<u8, SatResult>, navs: &Navs) -> Vec<f64> {
             for k in 0..8 {
                 let t = toe - 3600.0 + 900.0 * k as f64;
                 let Some(b) = nearest(&navs[sv], t) else { continue };
-                errs.push(sisre(rec, b, t).0);
+                let e = sisre(rec, b, t).0;
+                if e > 100.0 && std::env::var("OEE_DEBUG").is_ok() {
+                    eprintln!("self-check {} at {}: {e:.0} m against the record of toe {} (health {})",
+                              crate::rinex::sat_name(*sv), iso_utc(t), iso_utc(b.toe_abs), b.health);
+                }
+                errs.push(e);
             }
         }
     }
@@ -355,6 +369,11 @@ pub fn run(o: &Options) -> Result<(), String> {
     };
     eprintln!("orbit: {}\nERP:   {erp_src}", if o.from_broadcast.is_some() { "broadcast orbits" } else { &sp3_src });
     let mut sp3 = if o.from_broadcast.is_some() { BTreeMap::new() } else { read_sp3(&read_text(&sp3_src)?) };
+    if let Some(ps) = o.prediction_start {
+        for tr in sp3.values_mut() {
+            tr.predicted = tr.ts.iter().map(|&t| t > ps + 1.0).collect();
+        }
+    }
     let igs_start = sp3.values().filter_map(|t| t.predicted.iter().position(|&p| p).map(|k| t.ts[k]))
         .fold(f64::INFINITY, f64::min);
     let erp_text = read_text(&erp_src)?;
@@ -399,13 +418,13 @@ pub fn run(o: &Options) -> Result<(), String> {
         }
     }
     eprintln!("broadcasts:\n  {}", used.join("\n  "));
-    if !o.systems.contains(&'G') { sp3.clear(); }
+    sp3.retain(|sv, _| o.systems.contains(&crate::rinex::sat_sys(*sv)));
     // Tracks from broadcast orbits, for every system not read from an IGS orbit: all of them with
     // --from-broadcast, Galileo always. The arc ends where the prediction starts.
     let ps_bc = o.from_broadcast.unwrap_or(igs_start);
     for (sv, recs) in &navs {
         let sys = crate::rinex::sat_sys(*sv);
-        if !o.systems.contains(&sys) || (sys == 'G' && o.from_broadcast.is_none()) { continue; }
+        if !o.systems.contains(&sys) || (sys == 'G' && o.from_broadcast.is_none()) || sp3.contains_key(sv) { continue; }
         // a record is uploaded and broadcast from about two hours before its reference time
         let known: Vec<&Nav> = recs.iter().filter(|r| r.toe_abs <= ps_bc + 7200.0 && r.health == 0.0).collect();
         let mut tr = Track { from_broadcast: true, ..Track::default() };

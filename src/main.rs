@@ -67,7 +67,7 @@ fn parse(args: &[String]) -> Result<predict::Options, String> {
         out: ".".into(), sp3: None, erp: None, rinex: vec![], days: 7.0, warm: None, max_check_m: 5.0,
         jobs: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
         forces: orbit::Forces::default(), clock: predict::ClockModel::BroadcastQuad(5.0),
-        eop: predict::BULLETIN_A.into(), from_broadcast: None, arc_hours: 48.0, systems: vec!['G'],
+        eop: predict::BULLETIN_A.into(), from_broadcast: None, arc_hours: 48.0, systems: vec!['G'], prediction_start: None,
     };
     let mut i = 0;
     let val = |i: usize| args.get(i + 1).cloned().ok_or_else(|| format!("{} needs a value\n\n{USAGE}", args[i]));
@@ -91,6 +91,7 @@ fn parse(args: &[String]) -> Result<predict::Options, String> {
                 i += 2;
             }
             "--arc-hours" => { o.arc_hours = val(i)?.parse().map_err(|_| "--arc-hours: a number")?; i += 2; }
+            "--prediction-start" => { o.prediction_start = Some(select::parse_iso(&val(i)?)?); i += 2; }
             "--from-broadcast" => { o.from_broadcast = Some(select::parse_iso(&val(i)?)?); i += 2; }
             "--srp-sigma" => {
                 // nine comma-separated a priori sigmas, nm/s²: D0 Y0 B0 Bc Bs D2c D2s D4c D4s
