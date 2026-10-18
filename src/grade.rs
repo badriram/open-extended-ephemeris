@@ -23,7 +23,7 @@ pub fn run(pred: &str, truth: &[String]) -> Result<(), String> {
     let mut t = Navs::new();
     for f in truth { read_nav(&read_text(f)?, &mut t)?; }
     let t0 = p.values().flatten().map(|r| r.toe_abs).fold(f64::INFINITY, f64::min) - 7200.0;
-    let mut rows: Vec<(f64, f64, f64, f64)> = vec![];
+    let mut rows: Vec<(f64, f64, f64, f64, bool)> = vec![];
     let mut worst: Vec<(u8, f64)> = vec![];
     for (sv, recs) in &p {
         let Some(tb) = t.get(sv) else { continue };
@@ -35,24 +35,25 @@ pub fn run(pred: &str, truth: &[String]) -> Result<(), String> {
                     .min_by(|a, b| (a.toe_abs - tt).abs().partial_cmp(&(b.toe_abs - tt).abs()).unwrap()) else { continue };
                 let (s, d3) = sisre(r, b, tt);
                 let dclk = 299792458.0 * (r.clock(tt) - b.clock(tt));
-                rows.push(((tt - t0) / 86400.0, s, d3, dclk.abs()));
+                rows.push(((tt - t0) / 86400.0, s, d3, dclk.abs(), s > r.svacc));
                 w = w.max(s);
             }
         }
         worst.push((*sv, w));
     }
     if rows.is_empty() { return Err("no overlap between the prediction and the broadcasts".into()); }
-    println!("days      | range error median / 95% / worst | orbit 3D median | clock |median|");
+    println!("days      | range error median / 95% / worst | orbit 3D median | clock |median| | over stated accuracy");
     let max_d = rows.iter().map(|r| r.0).fold(0.0, f64::max);
     let mut d = 0.0;
     while d < max_d {
-        let sel: Vec<&(f64, f64, f64, f64)> = rows.iter().filter(|r| r.0 >= d && r.0 < d + 0.5).collect();
+        let sel: Vec<&(f64, f64, f64, f64, bool)> = rows.iter().filter(|r| r.0 >= d && r.0 < d + 0.5).collect();
         if !sel.is_empty() {
             let mut s: Vec<f64> = sel.iter().map(|r| r.1).collect();
             let mut o: Vec<f64> = sel.iter().map(|r| r.2).collect();
             let mut ck: Vec<f64> = sel.iter().map(|r| r.3).collect();
             let mx = s.iter().cloned().fold(0.0, f64::max);
-            println!("{d:3.1}-{:3.1}   | {:6.2} / {:6.2} / {:6.1} m        | {:6.2} m        | {:6.2} m", d + 0.5,
+            let over = 100.0 * sel.iter().filter(|r| r.4).count() as f64 / sel.len() as f64;
+            println!("{d:3.1}-{:3.1}   | {:6.2} / {:6.2} / {:6.1} m        | {:6.2} m        | {:6.2} m       | {over:5.1}%", d + 0.5,
                      median(&mut s.clone()), percentile(&mut s, 95.0), mx, median(&mut o), median(&mut ck));
         }
         d += 0.5;

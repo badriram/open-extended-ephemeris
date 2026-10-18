@@ -1,8 +1,8 @@
-# Publish a week of predicted GPS orbit data to the ephemeris-data branch:
+# Publish a week of predicted GPS and Galileo orbit data to the ephemeris-data branch:
 #   https://raw.githubusercontent.com/badriram/open-extended-ephemeris/ephemeris-data/gps-7d.rnx
 #   .../gps-7d-ubx.bin   .../gps-7d-casic.bin   .../gps-7d.json   .../fit-state.txt
-# Runs after each IGS ultra-rapid issue (00, 06, 12, 18 UTC, published about three hours late),
-# and by hand. A run takes a few seconds of computing; most of it is downloading.
+# Four times a day, and by hand, each run with CODE's newest 5-day orbit prediction (IGS
+# ultra-rapid as the fallback) and the newest broadcasts. A run takes under a minute.
 name: publish
 on:
   schedule:
@@ -29,17 +29,18 @@ jobs:
           cd out
           cp ../LICENSE .
           printf '%s\n' \
-            '# Predicted GPS orbit data (extended ephemeris)' '' \
-            'A week of GPS broadcast-style ephemerides predicted from the newest IGS ultra-rapid orbit by' \
+            '# Predicted GPS and Galileo orbit data (extended ephemeris)' '' \
+            'A week of GPS and Galileo broadcast-style ephemerides predicted from the newest CODE 5-day orbit by' \
             'https://github.com/badriram/open-extended-ephemeris. These are predictions, not the' \
             "satellites' own broadcasts. gps-7d.rnx is RINEX 3.04; gps-7d-ubx.bin is u-blox UBX-MGA-GPS-EPH" \
-            'frames (M8/M9/M10); gps-7d-casic.bin is CASIC MSG-GPSEPH frames for AT6558 receivers (Quectel' \
+            'and UBX-MGA-GAL-EPH frames (M8/M9/M10); gps-7d-casic.bin is GPS-only CASIC MSG-GPSEPH frames for AT6558 receivers (Quectel' \
             'L76K). "extended-ephemeris select" picks the frames for now. gps-7d.json says when and from what it was made,' \
             "with a self-check against the satellites' broadcasts. This branch holds only the latest." '' \
-            'Orbit and clock data: International GNSS Service (IGS), via BKG. MIT licence (see LICENSE).' > README.md
+            'Orbits: Center for Orbit Determination in Europe (CODE), University of Bern, DOI 10.48620/97774;' \
+            'International GNSS Service (IGS), via BKG. Broadcast clocks: IGS, via BKG. MIT licence (see LICENSE).' > README.md
           git init -q -b ephemeris-data
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
-          git commit -q -m "Predicted GPS orbit data, $(jq -r .prediction_starts gps-7d.json)"
+          git commit -q -m "Predicted GPS and Galileo orbit data, $(jq -r .prediction_starts gps-7d.json)"
           git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ephemeris-data

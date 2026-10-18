@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: MIT
-//! The prediction, per GPS satellite:
+//! The prediction, per GPS or Galileo satellite:
 //!
-//! 1. Take the newest IGS ultra-rapid orbit (24 h measured, 24 h predicted by the IGS) and its
-//!    Earth rotation parameters.
-//! 2. Fit the force model (orbit.rs) to that 48 h arc and integrate it a week ahead.
-//! 3. Every 2 h, fit a broadcast ephemeris (lnav.rs) to 4 h of trajectory: to the IGS's own
+//! 1. Take the newest orbit prediction and its Earth rotation parameters: CODE's 5-day GPS and
+//!    Galileo prediction by default (joined to the one before it while the newest starts in the
+//!    future), or the IGS ultra-rapid orbit (24 h measured, 24 h predicted), GPS only.
+//! 2. Fit the force model (orbit.rs) to that arc and integrate it a week ahead.
+//! 3. Every 2 h, fit a broadcast ephemeris (lnav.rs) to 4 h of trajectory: to the source's own
 //!    prediction while it lasts, then to ours.
-//! 4. Calibrate against the satellite's real broadcasts over the measured day: the antenna offset
-//!    (IGS orbits are centre of mass) and the clock reference. The clock is a straight line
-//!    through the IGS clock estimates.
-//! 5. Give each record an accuracy (URA) that grows with the prediction's age.
+//! 4. Calibrate against the satellite's real broadcasts over the known part of the arc: the
+//!    antenna offset (precise orbits are centre of mass).
+//! 5. Predict the clock from five days of the satellite's own broadcast clocks, as a quadratic.
+//! 6. Give each record an accuracy (URA/SISA): the population figure for its age, or more for a
+//!    satellite whose clock predicted its own last 1.5 days badly.
 use crate::eo::{extrapolate, join_bulletin_a, last_lod, read_bulletin_a, read_erp, EarthOrientation};
-use crate::fetch::{brdc_urls, latest_igu, read_text};
+use crate::fetch::{brdc_urls, latest_code_prd, latest_igu, read_text};
 use crate::linalg::*;
 use crate::lnav;
 use crate::orbit::{Forces, Orbit, Srp, State};
@@ -27,6 +29,10 @@ const STEP: f64 = 7200.0;             // one ephemeris every 2 h, as the satelli
 const C_LIGHT: f64 = 299792458.0;
 /// 95th-percentile range error by day of age in the backtest, as metres for the URA index.
 const URA_BY_DAY: [f64; 7] = [1.6, 4.3, 7.0, 9.8, 12.3, 15.0, 18.0];
+/// Galileo satellites left out: the In-Orbit Validation satellites, whose clocks were the least
+/// predictable over 2025 (day 4-5 medians 11-35 m, 95th percentiles 100-570 m, against ~1 m for the
+/// rest; results/2026-10-18-code-prediction.md).
+const EXCLUDED: [u8; 3] = [111, 112, 119];   // E11, E12, E19
 /// A warm-started force-model fit worse than this is redone from scratch.
 const WARM_MAX_RMS: f64 = 6.0;
 
@@ -52,9 +58,15 @@ pub struct Options {
     /// Treat orbit-file samples after this GPS time as predicted, whatever their flags (for CODE's
     /// 5-day prediction, whose flags start minutes after its first epoch).
     pub prediction_start: Option<f64>,
+    /// Where orbits come from when no --sp3 is given: "auto" (CODE's 5-day prediction, falling
+    /// back to the IGS ultra-rapid orbit for GPS alone), "code" or "igs".
+    pub source: String,
     /// Constellations to predict: 'G' (from the IGS orbit, or broadcasts with --from-broadcast) and
     /// 'E' (Galileo, always from broadcasts: there is no anonymous multi-GNSS ultra-rapid orbit).
     pub systems: Vec<char>,
+    /// --systems was given: build broadcast arcs for systems the orbit file lacks (otherwise only
+    /// with --from-broadcast; Galileo from broadcasts is too weak to publish by default).
+    pub systems_explicit: bool,
 }
 
 pub const BULLETIN_A: &str = "https://datacenter.iers.org/data/latestVersion/bulletinA.txt";
@@ -136,6 +148,27 @@ fn predict_sat(sv: u8, tr: &Track, recs: &[Nav], eo: &EarthOrientation, t_end: f
     if started != "warm" { fit = Some(model.fit(ts_fit, xg_fit, None)); }
     let (state, srp, fit_rms, iterations, converged) = fit.unwrap();
 
+    // How predictable this satellite's clock is: fit the clock model to the 3.5 days of broadcast
+    // history before the last 1.5 days, predict those, and take the median error. Each record's
+    // accuracy (URA/SISA) is then the larger of the population figure for its age and this
+    // satellite's own error grown with age (as the year of 2025 clocks grew, ~age^1.3, doubled
+    // for a 95th percentile). Receivers can then weight a poor clock down.
+    let hold_out_m: Option<f64> = {
+        let end = pred_start + LATENCY;
+        let mut all: BTreeMap<i64, f64> = history.iter().map(|&(t, c)| (t.round() as i64, c)).collect();
+        for r in recs { all.insert(r.toc_abs.round() as i64, r.af0); }
+        let pts: Vec<(f64, f64)> = all.iter().map(|(&t, &c)| (t as f64 - end, c)).filter(|&(t, _)| t >= -5.0 * 86400.0 && t <= 0.0).collect();
+        let (fit_pts, test): (Vec<_>, Vec<_>) = pts.iter().partition(|&&(t, _)| t < -1.5 * 86400.0);
+        fit_clock_poly(&fit_pts, true).filter(|_| test.len() >= 6).map(|c| {
+            let mut e: Vec<f64> = test.iter().map(|&(t, y)| (C_LIGHT * (c[0] + c[1] * t + c[2] * t * t - y)).abs()).collect();
+            median(&mut e)
+        })
+    };
+    let accuracy = |age_days: f64| -> f64 {
+        let table = URA_BY_DAY[(age_days.max(0.0) as usize).min(URA_BY_DAY.len() - 1)];
+        let own = hold_out_m.map_or(0.0, |e| 2.0 * e * (age_days.max(0.25) / 0.75).powf(1.3));
+        table.max(own)
+    };
     let grid: Vec<f64> = (0..).map(|i| ts[0] + 300.0 * i as f64).take_while(|&t| t <= t_end + STEP + 1.0).collect();
     let xe: Vec<V3> = model.propagate(&state, &srp, &grid).iter().zip(&grid).map(|(x, &t)| mv(&eo.c2t(t), *x)).collect();
     // Calibration over the measured day: where the broadcasts put the satellite and its clock,
@@ -209,13 +242,13 @@ fn predict_sat(sv: u8, tr: &Track, recs: &[Nav], eo: &EarthOrientation, t_end: f
         }).collect();
         let gm = if crate::rinex::sat_sys(sv) == 'E' { lnav::GM_GAL } else { lnav::GM };
         let (p, _rms) = lnav::fit(&win, &pos, toe, gm);
-        let age_days = ((toe - pred_start) / 86400.0).max(0.0) as usize;
+        let age_days = ((toe - pred_start) / 86400.0).max(0.0);
         let iodc = 768.0 + ((toe / STEP) as i64 % 240) as f64;
         let (af0, af1) = clock(toe - pred_start);
         let sys = crate::rinex::sat_sys(sv);
         records.push((toe, Nav {
             sys, ds: if sys == 'E' { 517.0 } else { 0.0 }, p, toe_abs: toe, toc_abs: toe, af0, af1, af2: 0.0,
-            iode: (iodc as i64 & 0xFF) as f64, iodc, svacc: URA_BY_DAY[age_days.min(URA_BY_DAY.len() - 1)],
+            iode: (iodc as i64 & 0xFF) as f64, iodc, svacc: accuracy(age_days),
             health: 0.0, tgd: latest.tgd, ttx: (toe - 7200.0).rem_euclid(WEEK),
         }));
         toe += STEP;
@@ -360,16 +393,50 @@ fn doy(y: i64, m: i64, d: i64) -> i64 { days_from_civil(y, m, d) - days_from_civ
 pub fn run(o: &Options) -> Result<(), String> {
     let t_run = std::time::Instant::now();
     let now = now_gps();
+    let mut systems = o.systems.clone();
+    let mut prediction_start = o.prediction_start;
     let (sp3_src, erp_src) = match (&o.sp3, &o.erp) {
         (Some(s), Some(e)) => (s.clone(), e.clone()),
         (None, None) if o.from_broadcast.is_some() => return Err("--from-broadcast needs --erp (and --rinex)".into()),
-        (None, None) => latest_igu(now)?,
+        (None, None) => {
+            let code = if o.source == "igs" { Err("not asked for".to_string()) } else { latest_code_prd(now) };
+            match code {
+                Ok(pair) => {
+                    // CODE's file starts at midnight of its issue day: predict from now, and use the
+                    // hours before as the orbit's known part
+                    prediction_start.get_or_insert(now);
+                    pair
+                }
+                Err(e) if o.source == "code" => return Err(format!("CODE: {e}")),
+                Err(e) => {
+                    if o.source != "igs" { eprintln!("CODE unavailable ({e}); falling back to the IGS ultra-rapid orbit, GPS only"); }
+                    systems.retain(|&c| c == 'G');
+                    latest_igu(now)?
+                }
+            }
+        }
         (None, Some(e)) if o.from_broadcast.is_some() => (String::new(), e.clone()),
         _ => return Err("--sp3 and --erp go together".into()),
     };
     eprintln!("orbit: {}\nERP:   {erp_src}", if o.from_broadcast.is_some() { "broadcast orbits" } else { &sp3_src });
-    let mut sp3 = if o.from_broadcast.is_some() { BTreeMap::new() } else { read_sp3(&read_text(&sp3_src)?) };
-    if let Some(ps) = o.prediction_start {
+    // Several orbit files may be given, comma-separated and oldest first: each later one takes over
+    // from its own first epoch.
+    let mut sp3: BTreeMap<u8, Track> = BTreeMap::new();
+    if o.from_broadcast.is_none() {
+        for src in sp3_src.split(',') {
+            for (sv, tr) in read_sp3(&read_text(src)?) {
+                match sp3.get_mut(&sv) {
+                    None => { sp3.insert(sv, tr); }
+                    Some(old) => {
+                        let keep = old.ts.iter().take_while(|&&t| t < tr.ts[0] - 1.0).count();
+                        old.ts.truncate(keep); old.xs.truncate(keep); old.cs.truncate(keep); old.predicted.truncate(keep);
+                        old.ts.extend(tr.ts); old.xs.extend(tr.xs); old.cs.extend(tr.cs); old.predicted.extend(tr.predicted);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(ps) = prediction_start {
         for tr in sp3.values_mut() {
             tr.predicted = tr.ts.iter().map(|&t| t > ps + 1.0).collect();
         }
@@ -418,13 +485,14 @@ pub fn run(o: &Options) -> Result<(), String> {
         }
     }
     eprintln!("broadcasts:\n  {}", used.join("\n  "));
-    sp3.retain(|sv, _| o.systems.contains(&crate::rinex::sat_sys(*sv)));
+    sp3.retain(|sv, _| systems.contains(&crate::rinex::sat_sys(*sv)) && !EXCLUDED.contains(sv));
     // Tracks from broadcast orbits, for every system not read from an IGS orbit: all of them with
     // --from-broadcast, Galileo always. The arc ends where the prediction starts.
     let ps_bc = o.from_broadcast.unwrap_or(igs_start);
     for (sv, recs) in &navs {
         let sys = crate::rinex::sat_sys(*sv);
-        if !o.systems.contains(&sys) || (sys == 'G' && o.from_broadcast.is_none()) || sp3.contains_key(sv) { continue; }
+        if !systems.contains(&sys) || (sys == 'G' && o.from_broadcast.is_none()) || sp3.contains_key(sv)
+            || EXCLUDED.contains(sv) || (o.from_broadcast.is_none() && !o.systems_explicit) { continue; }
         // a record is uploaded and broadcast from about two hours before its reference time
         let known: Vec<&Nav> = recs.iter().filter(|r| r.toe_abs <= ps_bc + 7200.0 && r.health == 0.0).collect();
         let mut tr = Track { from_broadcast: true, ..Track::default() };
@@ -512,8 +580,8 @@ pub fn run(o: &Options) -> Result<(), String> {
     std::fs::write(path("gps-7d-ubx.bin"), &ublob).map_err(|e| e.to_string())?;
     std::fs::write(path("gps-7d.rnx"), rinex::write_nav(&entries, &[
         "PREDICTED broadcast ephemeris (extended ephemeris), not".into(),
-        "broadcast by the satellites. GPS from IGS ultra-rapid".into(),
-        format!("orbit {}; Galileo from broadcast orbits", base(&sp3_src)),
+        "broadcast by the satellites. Orbits from CODE or IGS:".into(),
+        format!("orbit {}", base(&sp3_src)),
         "github.com/badriram/open-extended-ephemeris  MIT".into(),
     ])).map_err(|e| e.to_string())?;
     let mut state = String::from("# sv t0 x y z vx vy vz (GCRS m, m/s) D0 Y0 B0 Bc Bs D2c D2s D4c D4s (nm/s^2) rms (m)\n");
@@ -529,10 +597,15 @@ pub fn run(o: &Options) -> Result<(), String> {
     }
     std::fs::write(path("fit-state.txt"), state).map_err(|e| e.to_string())?;
     let sats: Vec<String> = results.keys().map(|s| format!("\"{}\"", crate::rinex::sat_name(*s))).collect();
+    let backtest = if sp3_src.contains("COD0OPSPRD") {
+        "range error median/95% at 4.5-5 days: GPS 1.8/12.2 m, Galileo 1.5/6.9 m (CODE 5-day orbit, predicting from 2026-10-13 06:00); from 2026-10-14 00:00, at 4-4.5 days: GPS 1.3/8.3 m, Galileo 0.7/5.8 m"
+    } else {
+        "range error median/95%: 0.2/0.7 m first half day, 0.6/4.3 m at 2 days, 2.2/12.3 m at 4.5-5 days, worst 14.6 m (IGS orbit of 2026-10-13 06:00); second backtest from 2026-10-14 00:00: 1.3/7.5 m at 4-4.5 days"
+    };
     let json = format!(r#"{{
   "made": "{made}",
-  "igs_orbit": "{sp3_src}",
-  "igs_erp": "{erp_src}",
+  "orbit": "{sp3_src}",
+  "erp": "{erp_src}",
   "earth_rotation": "{eop_used}",
   "clock_model": "{clock_model:?}",
   "solid_tides": {tides},
@@ -541,7 +614,7 @@ pub fn run(o: &Options) -> Result<(), String> {
   "broadcasts": [{bc}],
   "prediction_starts": "{ps}",
   "valid_until": "{vu}",
-  "igs_prediction_until": "{ipu}",
+  "orbit_prediction_until": "{ipu}",
   "satellites": [{sats}],
   "records": {nrec},
   "dropped_records": {ndrop},
@@ -552,7 +625,7 @@ pub fn run(o: &Options) -> Result<(), String> {
   "satellite_seconds": {{"median": {sm:.2}, "total": {st:.1}}},
   "run_seconds": {rs:.1},
   "self_check_vs_broadcast": {{"samples": {cn}, "median_m": {cm:.4}, "p95_m": {cp:.4}}},
-  "backtest": "range error median/95%: 0.2/0.7 m first half day, 0.6/4.3 m at 2 days, 2.2/12.3 m at 4.5-5 days, worst 14.6 m (IGS orbit of 2026-10-13 06:00); second backtest from 2026-10-14 00:00: 1.3/7.5 m at 4-4.5 days"
+  "backtest": "{backtest}"
 }}
 "#, made = iso_utc(now), bc = used.iter().map(|u| format!("\"{u}\"")).collect::<Vec<_>>().join(", "),
         ps = iso_utc(pred_start), vu = iso_utc(t_end), ipu = iso_utc(t_arc_end), sats = sats.join(", "),

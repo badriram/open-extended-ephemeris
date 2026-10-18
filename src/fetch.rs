@@ -62,3 +62,32 @@ pub fn brdc_urls(y: i64, doy: i64) -> Vec<String> {
          format!("{base}BRDC00WRD_R_{y}{doy:03}0000_01D_MN.rnx.gz"),
          format!("{base}BRDC00IGS_R_{y}{doy:03}0000_01D_MN.rnx.gz")]
 }
+
+pub const CODE: &str = "https://zhw-b.s3.cloud.switch.ch/aiub/CODE";
+
+/// URLs of CODE's newest 0-5 day orbit prediction (GPS, GLONASS, Galileo, every 5 minutes) and its
+/// ERP file, from the University of Bern's public bucket (the S3 listing API; the bucket has no
+/// index pages, and the old ftp.aiub.unibe.ch no longer answers).
+pub fn latest_code_prd(now: f64) -> Result<(String, String), String> {
+    let listing = fetch(&format!("https://zhw-b.s3.cloud.switch.ch/aiub?list-type=2&prefix=CODE/COD0OPSPRD_2&max-keys=1000"))?;
+    let listing = String::from_utf8_lossy(&listing);
+    let mut names: Vec<&str> = listing.split("<Key>CODE/").skip(1)
+        .filter_map(|s| s.split('<').next())
+        .filter(|n| n.ends_with("_05D_05M_ORB.SP3"))
+        .collect();
+    names.sort();
+    let orb = names.last().ok_or("no CODE 5-day prediction found")?;
+    let erp = orb.replace("_05D_05M_ORB.SP3", "_21D_06H_ERP.ERP");
+    // The file named for day N starts at 00:00 of day N+1 and is issued during day N, so for most
+    // of a day the newest one starts in the future. The one before it then covers now; both go in,
+    // the newer taking over from its first epoch.
+    let starts = |n: &str| -> Option<f64> {
+        let (y, d): (i64, i64) = (n.get(11..15)?.parse().ok()?, n.get(15..18)?.parse().ok()?);
+        Some(((crate::time::days_from_civil(y, 1, 1) + d) as f64) * 86400.0 - crate::time::UNIX_GPS0)
+    };
+    let mut orbits = vec![format!("{CODE}/{orb}")];
+    if starts(orb).map_or(false, |t| t > now - 6.0 * 3600.0) && names.len() >= 2 {
+        orbits.insert(0, format!("{CODE}/{}", names[names.len() - 2]));
+    }
+    Ok((orbits.join(","), format!("{CODE}/{erp}")))
+}

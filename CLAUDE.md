@@ -1,6 +1,6 @@
 # Working in this repo
 
-**open-extended-ephemeris** predicts GPS broadcast ephemeris a week ahead (extended ephemeris, the
+**open-extended-ephemeris** predicts GPS and Galileo broadcast ephemeris a week ahead (extended ephemeris, the
 open counterpart to u-blox AssistNow Offline / MediaTek EPO), so a receiver cold-starts in seconds
 for days without a network. One Rust program, `extended-ephemeris`; MIT. README.md has the method
 and the headline numbers; `results/` has every experiment, including the ones that did nothing.
@@ -8,16 +8,27 @@ Keep both current when a result changes.
 
 ## Structure
 
-- `src/predict.rs` — the pipeline: IGS ultra-rapid orbit + ERP + broadcasts in; per satellite, fit
-  the force model, propagate, fit an LNAV record every 2 h, calibrate, predict the clock; write
-  `gps-7d.rnx`, `gps-7d-ubx.bin`, `gps-7d-casic.bin`, `gps-7d.json`, `fit-state.txt`.
+- `src/predict.rs` — the pipeline: orbit + ERP + broadcasts in; per satellite, fit the force
+  model, propagate, fit an LNAV record every 2 h, calibrate, predict the clock, state an accuracy;
+  write `gps-7d.rnx`, `gps-7d-ubx.bin`, `gps-7d-casic.bin`, `gps-7d.json`, `fit-state.txt`. The
+  names say `gps-` but the RINEX and UBX files carry Galileo too; they keep the names so
+  published URLs stay stable.
+- Orbit source (`--source`): CODE's 5-day prediction (COD0OPSPRD, GPS + Galileo) by default, from
+  `https://zhw-b.s3.cloud.switch.ch/aiub/CODE/`; the IGS ultra-rapid orbit (GPS only) as the
+  fallback. The CODE file named for day N starts at 00:00 of day N+1 and appears during day N,
+  so `latest_code_prd` joins the previous file in front while the newest starts in the future.
+- Galileo IOV satellites E11, E12, E19 are excluded (`EXCLUDED` in predict.rs): their clocks are
+  an order of magnitude worse and they were the whole Galileo tail.
 - `src/orbit.rs` — force model (gravity + solid tide, Sun, Moon, relativity, ECOM2 radiation
-  pressure with a smooth penumbra), fixed-step DOP853, Levenberg-Marquardt fit with priors.
+  pressure with a smooth penumbra, optional Galileo box-wing from `src/boxwing.rs`), fixed-step
+  DOP853, Levenberg-Marquardt fit with priors.
 - `src/eo.rs` — Earth orientation (ERFA, IGS ERP, IERS Bulletin A), Sun/Moon tables.
-- `src/lnav.rs` — IS-GPS-200 broadcast ephemeris: evaluate and fit.
+- `src/lnav.rs` — IS-GPS-200 broadcast ephemeris: evaluate and fit (Galileo uses the same form
+  with its own GM). Satellite keys: GPS PRN as is, Galileo 100 + PRN.
 - `src/rinex.rs`, `src/sp3.rs`, `src/casic.rs`, `src/ubx.rs` — file formats. `src/fetch.rs` — curl/gzip.
 - `src/select.rs` — `select`: the ready-to-send burst (time, position, current frames) per receiver.
-- `src/grade.rs`, `src/clockbt.rs` — `grade` and `clock-backtest` subcommands.
+- `src/grade.rs`, `src/clockbt.rs` — `grade` and `clock-backtest` subcommands. `grade` also
+  reports how often range error exceeded each record's stated accuracy.
 - `vendor/erfa/` — 37 ERFA 2.0.1 files, **unmodified**, BSD-3-Clause, compiled by `build.rs`.
 - `.github/workflows/publish.yml` — runs four times a day and force-pushes the outputs to the
   `ephemeris-data` branch, which holds only the latest files. Consumers fetch from there.
@@ -48,22 +59,28 @@ Keep both current when a result changes.
   broadcast clocks beat every line and harmonic model. The orbit error left is along-track.
 - Bulletin A, the solid tide, relativity, degree-6 gravity and a finer step changed the results by
   less than noise. Even the UT1 measured afterwards did no better: Earth rotation is not the limit.
+- Galileo from broadcast orbits was weak (~9 m median at day 5) and no force-model change (box-wing,
+  fitted antenna offset) fixed it: the input was the limit. CODE's orbit fixed it.
+- A backtest from a CODE file must say `--prediction-start`, since the file has no measured part.
+  The time is UTC: 05:59:42Z is 06:00 GPS and made the first predicted sample 06:05, so the
+  backtests use one sample earlier, 05:54:42Z.
 
 ## Running
 
 ```bash
 cargo test --release
 cargo build --release
-./target/release/extended-ephemeris --out out/          # newest IGS data from BKG
+./target/release/extended-ephemeris --out out/          # newest CODE orbit + BKG broadcasts
 ./target/release/extended-ephemeris grade out/gps-7d.rnx BRDC...rnx.gz ...
 ./target/release/extended-ephemeris clock-backtest --models quad:5,line:1 BRDC...rnx.gz ...
 ```
 
-A run takes ~3 s of computing on 14 cores; downloads dominate. BKG keeps about a week of IGS
+A run takes 17-35 s of computing on 14 cores (about 3 s from the IGS orbit). BKG keeps about a week of IGS
 ultra-rapid products under `root_ftp/IGS/products/<gps week>/`; daily broadcast files are under
 `root_ftp/IGS/BRDC/<year>/<doy>/` for the recent past and for past years (older years have also
-lived under `root_ftp/IGS/obs/<year>/<doy>/`). Backtests need the IGS orbit of the start day plus
-broadcasts from five days before it to the end of the graded span.
+lived under `root_ftp/IGS/obs/<year>/<doy>/`). CODE keeps its predictions in the S3 bucket above
+(list with `?list-type=2&prefix=CODE/COD0OPSPRD_`). Backtests need the orbit file that was newest
+at the start time plus broadcasts from five days before it to the end of the graded span.
 
 ## Related
 

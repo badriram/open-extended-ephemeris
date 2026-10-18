@@ -23,22 +23,23 @@ mod ubx;
 mod tests;
 
 const USAGE: &str = "\
-extended-ephemeris: a week of predicted GPS orbit data (extended ephemeris)
+extended-ephemeris: a week of predicted GPS and Galileo orbit data (extended ephemeris)
 
 usage:
   extended-ephemeris [predict] [--out DIR] [--days N] [--warm fit-state.txt]
                      [--sp3 FILE|URL --erp FILE|URL] [--rinex FILE|URL ...]
                      [--max-check-m M] [--jobs N] [--clock line|harmonic|harmonic-drift]
                      [--no-tides] [--no-relativity] [--srp-sigma S1,...,S9]
-                     [--eop BULLETIN-A-FILE|URL|none] [--systems G,E]
+                     [--eop BULLETIN-A-FILE|URL|none] [--systems G,E] [--source auto|code|igs]
+                     [--prediction-start YYYY-MM-DDTHH:MM:SSZ]
   extended-ephemeris grade PREDICTED.rnx BROADCAST.rnx[.gz] ...
   extended-ephemeris select --format ubx|casic --out FILE [--at YYYY-MM-DDTHH:MMZ]
                      [--position LAT,LON[,HEIGHT]] [PREDICTED.rnx|URL]
   extended-ephemeris clock-backtest [--models quad:5,line:1,...] [--every HOURS] BROADCAST.rnx[.gz] ...
 
-predict (the default) fetches the newest IGS ultra-rapid orbit and the broadcasts it needs from
-BKG, and writes gps-7d.rnx, gps-7d-casic.bin, gps-7d-ubx.bin, gps-7d.json and fit-state.txt to
---out (default .).
+predict (the default) fetches CODE's newest 5-day GPS and Galileo orbit prediction (or, failing
+that, the IGS ultra-rapid orbit, GPS only) and the broadcasts it needs from BKG, and writes
+gps-7d.rnx, gps-7d-casic.bin, gps-7d-ubx.bin, gps-7d.json and fit-state.txt to --out (default .).
 select writes a ready-to-send burst (time, optional position, the ephemerides for now) for a
 u-blox or CASIC receiver, from a predicted RINEX file (default: the published one).
 grade compares a predicted RINEX file with what the satellites broadcast.
@@ -67,7 +68,7 @@ fn parse(args: &[String]) -> Result<predict::Options, String> {
         out: ".".into(), sp3: None, erp: None, rinex: vec![], days: 7.0, warm: None, max_check_m: 5.0,
         jobs: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
         forces: orbit::Forces::default(), clock: predict::ClockModel::BroadcastQuad(5.0),
-        eop: predict::BULLETIN_A.into(), from_broadcast: None, arc_hours: 48.0, systems: vec!['G'], prediction_start: None,
+        eop: predict::BULLETIN_A.into(), from_broadcast: None, arc_hours: 48.0, systems: vec!['G', 'E'], prediction_start: None, source: "auto".into(), systems_explicit: false,
     };
     let mut i = 0;
     let val = |i: usize| args.get(i + 1).cloned().ok_or_else(|| format!("{} needs a value\n\n{USAGE}", args[i]));
@@ -87,10 +88,16 @@ fn parse(args: &[String]) -> Result<predict::Options, String> {
             "--no-antenna-offset" => { o.forces.antenna_offset = false; i += 1; }
             "--systems" => {
                 o.systems = val(i)?.split(',').filter_map(|x| x.trim().chars().next()).collect();
+                o.systems_explicit = true;
                 if o.systems.iter().any(|c| *c != 'G' && *c != 'E') { return Err("--systems: G and/or E".into()); }
                 i += 2;
             }
             "--arc-hours" => { o.arc_hours = val(i)?.parse().map_err(|_| "--arc-hours: a number")?; i += 2; }
+            "--source" => {
+                o.source = val(i)?;
+                if !["auto", "code", "igs"].contains(&o.source.as_str()) { return Err("--source auto, code or igs".into()); }
+                i += 2;
+            }
             "--prediction-start" => { o.prediction_start = Some(select::parse_iso(&val(i)?)?); i += 2; }
             "--from-broadcast" => { o.from_broadcast = Some(select::parse_iso(&val(i)?)?); i += 2; }
             "--srp-sigma" => {
