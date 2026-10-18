@@ -2,7 +2,8 @@
 //! select: from a predicted week (RINEX, a local file or the published URL), pick each satellite's
 //! record nearest a moment (now by default, within 2 h) and write a ready-to-send assistance burst
 //! for a receiver: for u-blox, MGA-INI-TIME_UTC [+ MGA-INI-POS_LLH] then MGA-GPS-EPH; for CASIC
-//! (Quectel L76K and other AT6558 receivers), AID-INI then MSG-GPSEPH.
+//! (Quectel L76K and other AT6558 receivers), AID-INI then MSG-GPSEPH. Galileo records, when the
+//! file has them, go out as UBX-MGA-GAL-EPH (u-blox only).
 use crate::fetch::read_text;
 use crate::rinex::{read_nav, Navs};
 use crate::time::{gps_seconds, iso_utc, now_gps, UTC_GPS};
@@ -51,7 +52,13 @@ pub fn run(args: &[String]) -> Result<(), String> {
     for (sv, recs) in &navs {
         let Some(r) = recs.iter().filter(|r| (r.toe_abs - t).abs() <= 7200.0)
             .min_by(|a, b| (a.toe_abs - t).abs().partial_cmp(&(b.toe_abs - t).abs()).unwrap()) else { continue };
-        burst.extend(if format == "ubx" { ubx::gpseph_frame(r, *sv)? } else { casic::gpseph_frame(r, *sv)? });
+        let prn = crate::rinex::sat_prn(*sv);
+        match (format.as_str(), r.sys) {
+            ("ubx", 'E') => burst.extend(ubx::galeph_frame(r, prn)?),
+            ("ubx", _) => burst.extend(ubx::gpseph_frame(r, prn)?),
+            (_, 'G') => burst.extend(casic::gpseph_frame(r, prn)?),
+            _ => continue,                       // AT6558 receivers have no Galileo
+        }
         n += 1;
     }
     if n == 0 {

@@ -49,6 +49,9 @@ pub struct Options {
     pub from_broadcast: Option<f64>,
     /// Length of the broadcast-built arc, hours.
     pub arc_hours: f64,
+    /// Constellations to predict: 'G' (from the IGS orbit, or broadcasts with --from-broadcast) and
+    /// 'E' (Galileo, always from broadcasts: there is no anonymous multi-GNSS ultra-rapid orbit).
+    pub systems: Vec<char>,
 }
 
 pub const BULLETIN_A: &str = "https://datacenter.iers.org/data/latestVersion/bulletinA.txt";
@@ -100,7 +103,7 @@ fn rac(x: V3, v: V3) -> M3 {
 }
 
 fn predict_sat(sv: u8, tr: &Track, recs: &[Nav], eo: &EarthOrientation, t_end: f64, warm: Option<FitState>,
-               forces: Forces, clock_model: ClockModel, history: &[(f64, f64)], from_broadcast: bool) -> Option<SatResult> {
+               forces: Forces, clock_model: ClockModel, history: &[(f64, f64)]) -> Option<SatResult> {
     let start = std::time::Instant::now();
     let ts = &tr.ts;
     let n = ts.len();
@@ -133,8 +136,8 @@ fn predict_sat(sv: u8, tr: &Track, recs: &[Nav], eo: &EarthOrientation, t_end: f
         // Against the IGS orbit (centre of mass) when there is one. Built from broadcasts, the
         // track is itself at the antenna, which no orbit can follow; the fitted orbit settles on
         // the centre of mass, so measure the offset against that instead (it was +1.4 m radial).
-        let reference = if from_broadcast { xe[((ts[k] - grid[0]) / 300.0).round() as usize] } else { tr.xs[k] };
-        d_rac.push(mv(&rac(reference, v), sub(lnav::sat_pos(&b.p, b.toe_abs, ts[k]), reference)));
+        let reference = if tr.from_broadcast { xe[((ts[k] - grid[0]) / 300.0).round() as usize] } else { tr.xs[k] };
+        d_rac.push(mv(&rac(reference, v), sub(b.pos(ts[k]), reference)));
         if !tr.cs[k].is_nan() { d_clk.push(b.clock(ts[k]) - tr.cs[k]); }
     }
     if d_rac.len() < 10 { return None; }
@@ -186,18 +189,19 @@ fn predict_sat(sv: u8, tr: &Track, recs: &[Nav], eo: &EarthOrientation, t_end: f
             let v = sub(pos[(i + 1).min(pos.len() - 1)], pos[i.saturating_sub(1)]);
             add(pos[i], mtv(&rac(pos[i], v), off_rac))
         }).collect();
-        let (p, _rms) = lnav::fit(&win, &pos, toe);
+        let gm = if crate::rinex::sat_sys(sv) == 'E' { lnav::GM_GAL } else { lnav::GM };
+        let (p, _rms) = lnav::fit(&win, &pos, toe, gm);
         let age_days = ((toe - pred_start) / 86400.0).max(0.0) as usize;
         let iodc = 768.0 + ((toe / STEP) as i64 % 240) as f64;
         let (af0, af1) = clock(toe - pred_start);
+        let sys = crate::rinex::sat_sys(sv);
         records.push((toe, Nav {
-            p, toe_abs: toe, toc_abs: toe, af0, af1, af2: 0.0,
+            sys, ds: if sys == 'E' { 517.0 } else { 0.0 }, p, toe_abs: toe, toc_abs: toe, af0, af1, af2: 0.0,
             iode: (iodc as i64 & 0xFF) as f64, iodc, svacc: URA_BY_DAY[age_days.min(URA_BY_DAY.len() - 1)],
             health: 0.0, tgd: latest.tgd, ttx: (toe - 7200.0).rem_euclid(WEEK),
         }));
         toe += STEP;
     }
-    let _ = sv;
     // broadcast clock history to carry to the next run: the last seven days
     let mut all: BTreeMap<i64, f64> = history.iter().map(|&(t, c)| (t.round() as i64, c)).collect();
     for r in recs { all.insert(r.toc_abs.round() as i64, r.af0); }
@@ -296,8 +300,8 @@ fn self_check(results: &BTreeMap<u8, SatResult>, navs: &Navs) -> Vec<f64> {
 
 /// Signal-in-space range error and 3D orbit difference of a record against a reference record.
 pub fn sisre(r: &Nav, b: &Nav, t: f64) -> (f64, f64) {
-    let xb = lnav::sat_pos(&b.p, b.toe_abs, t);
-    let d = sub(lnav::sat_pos(&r.p, r.toe_abs, t), xb);
+    let xb = b.pos(t);
+    let d = sub(r.pos(t), xb);
     let dr = dot(d, unit(xb));
     let dc = C_LIGHT * (r.clock(t) - b.clock(t));
     (((0.98 * dr - dc).powi(2) + (dot(d, d) - dr * dr) / 49.0).sqrt(), norm(d))
@@ -342,6 +346,8 @@ pub fn run(o: &Options) -> Result<(), String> {
     };
     eprintln!("orbit: {}\nERP:   {erp_src}", if o.from_broadcast.is_some() { "broadcast orbits" } else { &sp3_src });
     let mut sp3 = if o.from_broadcast.is_some() { BTreeMap::new() } else { read_sp3(&read_text(&sp3_src)?) };
+    let igs_start = sp3.values().filter_map(|t| t.predicted.iter().position(|&p| p).map(|k| t.ts[k]))
+        .fold(f64::INFINITY, f64::min);
     let erp_text = read_text(&erp_src)?;
     let igs_erp = read_erp(&erp_text)?;
     let mut erp = extrapolate(&igs_erp, last_lod(&erp_text));
@@ -384,31 +390,37 @@ pub fn run(o: &Options) -> Result<(), String> {
         }
     }
     eprintln!("broadcasts:\n  {}", used.join("\n  "));
-    if let Some(ps) = o.from_broadcast {
-        // tracks from the broadcast orbits a receiver could have had by ps: a record is uploaded
-        // and broadcast from about two hours before its reference time
-        for (sv, recs) in &navs {
-            let known: Vec<&Nav> = recs.iter().filter(|r| r.toe_abs <= ps + 7200.0 && r.health == 0.0).collect();
-            let mut tr = Track::default();
-            let nk = (o.arc_hours * 4.0).round() as usize;
-            for k in 0..=nk {
-                let t = ps - o.arc_hours * 3600.0 + 900.0 * k as f64;
-                let Some(r) = known.iter().filter(|r| (r.toe_abs - t).abs() <= 7200.0)
-                    .min_by(|a, b| (a.toe_abs - t).abs().partial_cmp(&(b.toe_abs - t).abs()).unwrap()) else { continue };
-                tr.ts.push(t);
-                tr.xs.push(crate::lnav::sat_pos(&r.p, r.toe_abs, t));
-                tr.cs.push(r.clock(t));
-                tr.predicted.push(false);
-            }
-            if tr.ts.len() as f64 >= 0.75 * nk as f64 { sp3.insert(*sv, tr); }
+    if !o.systems.contains(&'G') { sp3.clear(); }
+    // Tracks from broadcast orbits, for every system not read from an IGS orbit: all of them with
+    // --from-broadcast, Galileo always. The arc ends where the prediction starts.
+    let ps_bc = o.from_broadcast.unwrap_or(igs_start);
+    for (sv, recs) in &navs {
+        let sys = crate::rinex::sat_sys(*sv);
+        if !o.systems.contains(&sys) || (sys == 'G' && o.from_broadcast.is_none()) { continue; }
+        // a record is uploaded and broadcast from about two hours before its reference time
+        let known: Vec<&Nav> = recs.iter().filter(|r| r.toe_abs <= ps_bc + 7200.0 && r.health == 0.0).collect();
+        let mut tr = Track { from_broadcast: true, ..Track::default() };
+        let nk = (o.arc_hours * 4.0).round() as usize;
+        for k in 0..=nk {
+            let t = ps_bc - o.arc_hours * 3600.0 + 900.0 * k as f64;
+            let Some(r) = known.iter().filter(|r| (r.toe_abs - t).abs() <= 7200.0)
+                .min_by(|a, b| (a.toe_abs - t).abs().partial_cmp(&(b.toe_abs - t).abs()).unwrap()) else { continue };
+            tr.ts.push(t);
+            tr.xs.push(r.pos(t));
+            tr.cs.push(r.clock(t));
+            tr.predicted.push(false);
         }
-        if sp3.is_empty() { return Err("no broadcast orbits cover the 48 h before --from-broadcast".into()); }
+        if tr.ts.len() as f64 >= 0.75 * nk as f64 { sp3.insert(*sv, tr); }
     }
+    if sp3.is_empty() { return Err("no satellites to predict".into()); }
     let t_arc_end = sp3.values().map(|t| *t.ts.last().unwrap()).fold(f64::NEG_INFINITY, f64::max);
 
-    let pred_start = o.from_broadcast.unwrap_or_else(|| sp3.values()
-        .filter_map(|t| t.predicted.iter().position(|&p| p).map(|k| t.ts[k])).fold(f64::INFINITY, f64::min));
+    let pred_start = ps_bc;
     let t_end = pred_start + o.days * 86400.0;
+    // The Earth-orientation table must cover every track: broadcast-built arcs start 48 h before
+    // the prediction, IGS ones 24 h. (Sized from the IGS arc alone, it left the first 21 h of each
+    // Galileo arc on a clamped, wrong Earth orientation: fits of ~27 m RMS.)
+    let t0 = sp3.values().map(|t| t.ts[0]).fold(t0, f64::min);
     let warm_t0 = warm.values().map(|w| w.t0).fold(t0, f64::min);
     let eo = EarthOrientation::new(&erp, warm_t0, t_end + STEP);
     let jobs: Vec<(u8, &Track)> = sp3.iter()
@@ -424,7 +436,7 @@ pub fn run(o: &Options) -> Result<(), String> {
                 if i >= jobs.len() { break; }
                 let (sv, tr) = jobs[i];
                 if let Some(r) = predict_sat(sv, tr, &navs[&sv], &eo, t_end, warm.get(&sv).copied(), o.forces, o.clock,
-                                             history.get(&sv).map_or(&[][..], |v| &v[..]), o.from_broadcast.is_some()) {
+                                             history.get(&sv).map_or(&[][..], |v| &v[..])) {
                     results.lock().unwrap().insert(sv, r);
                 }
             });
@@ -439,15 +451,16 @@ pub fn run(o: &Options) -> Result<(), String> {
     // fit) is dropped and reported; one odd satellite must never stop the whole publication.
     let before = entries.len();
     let mut dropped: Vec<String> = vec![];
-    entries.retain(|(sv, n)| match (casic::gpseph_payload(n, *sv), crate::ubx::gpseph_payload(n, *sv)) {
-        (Ok(_), Ok(_)) => true,
-        (Err(e), _) | (_, Err(e)) => { dropped.push(format!("G{sv:02} {}: {e}", iso_utc(n.toe_abs))); false }
+    entries.retain(|(sv, n)| {
+        let ok = if n.sys == 'E' { crate::ubx::galeph_payload(n, crate::rinex::sat_prn(*sv)).map(|_| ()) }
+                 else { casic::gpseph_payload(n, *sv).and(crate::ubx::gpseph_payload(n, *sv)).map(|_| ()) };
+        if let Err(e) = ok { dropped.push(format!("{} {}: {e}", crate::rinex::sat_name(*sv), iso_utc(n.toe_abs))); false } else { true }
     });
     if !dropped.is_empty() {
         eprintln!("dropped {} of {before} records that would not encode:\n  {}", dropped.len(), dropped.join("\n  "));
     }
     let mut blob = Vec::new();
-    for (sv, n) in &entries { blob.extend(casic::gpseph_frame(n, *sv)?); }
+    for (sv, n) in entries.iter().filter(|e| e.1.sys == 'G') { blob.extend(casic::gpseph_frame(n, *sv)?); }
     casic::check_frames(&blob)?;
     let mut errs = self_check(&results, &navs);
     let check = if errs.is_empty() { (0, f64::NAN, f64::NAN) } else {
@@ -464,13 +477,15 @@ pub fn run(o: &Options) -> Result<(), String> {
     let path = |f: &str| format!("{}/{f}", o.out.trim_end_matches('/'));
     std::fs::write(path("gps-7d-casic.bin"), &blob).map_err(|e| e.to_string())?;
     let mut ublob = Vec::new();
-    for (sv, n) in &entries { ublob.extend(crate::ubx::gpseph_frame(n, *sv)?); }
+    for (sv, n) in &entries {
+        ublob.extend(if n.sys == 'E' { crate::ubx::galeph_frame(n, crate::rinex::sat_prn(*sv))? } else { crate::ubx::gpseph_frame(n, *sv)? });
+    }
     crate::ubx::check_frames(&ublob)?;
     std::fs::write(path("gps-7d-ubx.bin"), &ublob).map_err(|e| e.to_string())?;
     std::fs::write(path("gps-7d.rnx"), rinex::write_nav(&entries, &[
         "PREDICTED broadcast ephemeris (extended ephemeris), not".into(),
-        "broadcast by the satellites. From IGS ultra-rapid orbit".into(),
-        base(&sp3_src),
+        "broadcast by the satellites. GPS from IGS ultra-rapid".into(),
+        format!("orbit {}; Galileo from broadcast orbits", base(&sp3_src)),
         "github.com/badriram/open-extended-ephemeris  MIT".into(),
     ])).map_err(|e| e.to_string())?;
     let mut state = String::from("# sv t0 x y z vx vy vz (GCRS m, m/s) D0 Y0 B0 Bc Bs D2c D2s D4c D4s (nm/s^2) rms (m)\n");
@@ -485,7 +500,7 @@ pub fn run(o: &Options) -> Result<(), String> {
         for (t, c) in &r.clocks { state += &format!("clk {sv} {t:.0} {c:.15e}\n"); }
     }
     std::fs::write(path("fit-state.txt"), state).map_err(|e| e.to_string())?;
-    let sats: Vec<String> = results.keys().map(|s| s.to_string()).collect();
+    let sats: Vec<String> = results.keys().map(|s| format!("\"{}\"", crate::rinex::sat_name(*s))).collect();
     let json = format!(r#"{{
   "made": "{made}",
   "igs_orbit": "{sp3_src}",

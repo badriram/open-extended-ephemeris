@@ -162,6 +162,7 @@ impl EarthOrientation {
     }
 
     fn lin<T: Copy, F: Fn(T, T, f64) -> T>(&self, table: &[T], t: f64, mix: F) -> T {
+        debug_assert!(t >= self.t0 && t <= self.t0 + (table.len() - 1) as f64 * STEP, "Earth orientation table does not cover {t}");
         let k = (((t - self.t0) / STEP).floor() as isize).clamp(0, table.len() as isize - 2) as usize;
         let f = (t - (self.t0 + k as f64 * STEP)) / STEP;
         mix(table[k], table[k + 1], f)

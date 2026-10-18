@@ -11,6 +11,8 @@ pub struct Track {
     pub xs: Vec<V3>,      // ITRF, m
     pub cs: Vec<f64>,     // s, NaN where absent
     pub predicted: Vec<bool>,
+    /// Built from broadcast orbits (antenna-referenced) rather than read from an IGS orbit.
+    pub from_broadcast: bool,
 }
 
 pub fn read_sp3(text: &str) -> BTreeMap<u8, Track> {

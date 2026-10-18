@@ -94,7 +94,8 @@ aside). The first version, in Python, took 5.6 minutes for identical results.
 Other options: `--sp3 FILE|URL --erp FILE|URL` and `--rinex FILE|URL ...` to predict from given
 files, `--eop FILE|URL|none` (Bulletin A; default the latest from the IERS), `--days N`, `--jobs N`,
 and for experiments `--clock line|harmonic|harmonic-drift|broadcast-line:DAYS|broadcast-quad:DAYS`,
-`--srp-sigma S1,...,S9`, `--no-tides`, `--no-relativity`, and `--from-broadcast TIME [--arc-hours H]`
+`--srp-sigma S1,...,S9`, `--no-tides`, `--no-relativity`, `--systems G,E` (add Galileo), and
+`--from-broadcast TIME [--arc-hours H]`
 (predict from broadcast orbits, no IGS orbit; needs `--erp` and `--rinex`). `extended-ephemeris grade PREDICTED.rnx BROADCAST.rnx.gz ...`
 grades a prediction against what the satellites broadcast, and `extended-ephemeris clock-backtest
 BROADCAST.rnx.gz ...` tests clock models over any span of broadcast history (BKG keeps a week of daily files at
@@ -132,10 +133,11 @@ The branch holds only the latest files:
 
 ## Limits
 
-- GPS only: the IGS ultra-rapid orbit has no BeiDou or Galileo, and multi-GNSS ultra-rapid orbits
-  are not anonymously available. `--from-broadcast` builds the arc from broadcast orbits instead,
-  which carry every constellation, for roughly twice the median error
-  ([results](results/2026-10-18-broadcast-only.md)); the way to Galileo and BeiDou.
+- GPS by default. The IGS ultra-rapid orbit has no Galileo or BeiDou, and multi-GNSS ultra-rapid
+  orbits are not anonymously available, so `--systems G,E` adds Galileo built from its broadcast
+  orbits ([results](results/2026-10-18-galileo.md)): excellent clocks, weaker orbits (median range
+  error ~9 m at day 5); not yet published. `--from-broadcast` does the same for GPS
+  ([results](results/2026-10-18-broadcast-only.md)).
 - One backtest, 4.7 days. Days 5-7 are extrapolated.
 - Satellites that manoeuvre during the week will be wrong until the next run; the receiver still
   recovers by downloading their real orbit data.

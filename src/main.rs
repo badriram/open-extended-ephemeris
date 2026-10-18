@@ -29,7 +29,7 @@ usage:
                      [--sp3 FILE|URL --erp FILE|URL] [--rinex FILE|URL ...]
                      [--max-check-m M] [--jobs N] [--clock line|harmonic|harmonic-drift]
                      [--no-tides] [--no-relativity] [--srp-sigma S1,...,S9]
-                     [--eop BULLETIN-A-FILE|URL|none]
+                     [--eop BULLETIN-A-FILE|URL|none] [--systems G,E]
   extended-ephemeris grade PREDICTED.rnx BROADCAST.rnx[.gz] ...
   extended-ephemeris select --format ubx|casic --out FILE [--at YYYY-MM-DDTHH:MMZ]
                      [--position LAT,LON[,HEIGHT]] [PREDICTED.rnx|URL]
@@ -66,7 +66,7 @@ fn parse(args: &[String]) -> Result<predict::Options, String> {
         out: ".".into(), sp3: None, erp: None, rinex: vec![], days: 7.0, warm: None, max_check_m: 5.0,
         jobs: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
         forces: orbit::Forces::default(), clock: predict::ClockModel::BroadcastQuad(5.0),
-        eop: predict::BULLETIN_A.into(), from_broadcast: None, arc_hours: 48.0,
+        eop: predict::BULLETIN_A.into(), from_broadcast: None, arc_hours: 48.0, systems: vec!['G'],
     };
     let mut i = 0;
     let val = |i: usize| args.get(i + 1).cloned().ok_or_else(|| format!("{} needs a value\n\n{USAGE}", args[i]));
@@ -82,6 +82,11 @@ fn parse(args: &[String]) -> Result<predict::Options, String> {
             "--no-tides" => { o.forces.tides = false; i += 1; }
             "--eop" => { o.eop = val(i)?; i += 2; }
             "--no-relativity" => { o.forces.relativity = false; i += 1; }
+            "--systems" => {
+                o.systems = val(i)?.split(',').filter_map(|x| x.trim().chars().next()).collect();
+                if o.systems.iter().any(|c| *c != 'G' && *c != 'E') { return Err("--systems: G and/or E".into()); }
+                i += 2;
+            }
             "--arc-hours" => { o.arc_hours = val(i)?.parse().map_err(|_| "--arc-hours: a number")?; i += 2; }
             "--from-broadcast" => { o.from_broadcast = Some(select::parse_iso(&val(i)?)?); i += 2; }
             "--srp-sigma" => {

@@ -122,7 +122,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     println!("\n{} at day 4-5, by satellite (worst 95th percentiles first): median / 95% / worst (m)", name(&models[focus]));
     let mut rows: Vec<(f64, u8, f64, f64)> = by_sat.iter().map(|(sv, v)| { let (md, p95, _, mx) = stat(v); (p95, *sv, md, mx) }).collect();
     rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
-    for (p95, sv, md, mx) in rows.iter().take(12) { println!("  G{sv:02}: {md:5.2} / {p95:6.2} / {mx:7.1}"); }
-    println!("  ... best: {}", rows.iter().rev().take(5).map(|r| format!("G{:02} {:.2}", r.1, r.0)).collect::<Vec<_>>().join(", "));
+    for (p95, sv, md, mx) in rows.iter().take(12) { println!("  {}: {md:5.2} / {p95:6.2} / {mx:7.1}", crate::rinex::sat_name(*sv)); }
+    println!("  ... best: {}", rows.iter().rev().take(5).map(|r| format!("{} {:.2}", crate::rinex::sat_name(r.1), r.0)).collect::<Vec<_>>().join(", "));
     Ok(())
 }

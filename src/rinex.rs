@@ -8,8 +8,16 @@ use crate::lnav::Params;
 use crate::time::{calendar, gps_seconds, WEEK};
 use std::collections::BTreeMap;
 
+/// Satellites are keyed by one byte: GPS by PRN (1-32), Galileo by 100 + PRN (101-136).
+pub fn sat_key(sys: char, prn: u8) -> u8 { if sys == 'E' { 100 + prn } else { prn } }
+pub fn sat_sys(key: u8) -> char { if key > 100 { 'E' } else { 'G' } }
+pub fn sat_prn(key: u8) -> u8 { if key > 100 { key - 100 } else { key } }
+pub fn sat_name(key: u8) -> String { format!("{}{:02}", sat_sys(key), sat_prn(key)) }
+
 #[derive(Clone, Debug)]
 pub struct Nav {
+    pub sys: char,       // 'G' or 'E'
+    pub ds: f64,         // Galileo data sources (517 = I/NAV E1-B and E5b); unused for GPS
     pub p: Params,       // sqrtA e M0 omega i0 Omega0 OmegaDot deltaN IDOT Cuc Cus Crc Crs Cic Cis
     pub toe_abs: f64,    // continuous GPS seconds
     pub toc_abs: f64,
@@ -22,6 +30,12 @@ pub struct Nav {
     pub health: f64,
     pub tgd: f64,
     pub ttx: f64,        // seconds of week
+}
+
+impl Nav {
+    pub fn gm(&self) -> f64 { if self.sys == 'E' { crate::lnav::GM_GAL } else { crate::lnav::GM } }
+    /// ECEF position at t.
+    pub fn pos(&self, t: f64) -> crate::linalg::V3 { crate::lnav::sat_pos_gm(&self.p, self.toe_abs, t, self.gm()) }
 }
 
 impl Nav {
@@ -46,13 +60,14 @@ fn field(line: &str, a: usize, b: usize) -> &str {
     if a >= n { "" } else { &line[a..b.min(n)] }
 }
 
-/// Add the GPS records of RINEX 3 navigation text to `out`.
+/// Add the GPS and Galileo (I/NAV) records of RINEX 3 navigation text to `out`.
 pub fn read_nav(text: &str, out: &mut Navs) -> Result<(), String> {
     let lines: Vec<&str> = text.lines().collect();
     let mut k = lines.iter().position(|l| l.contains("END OF HEADER")).ok_or("no RINEX header")? + 1;
     while k < lines.len() {
         let l = lines[k];
-        if !l.starts_with('G') || k + 7 >= lines.len() || l.len() < 23 { k += 1; continue; }
+        let sys = l.chars().next().unwrap_or(' ');
+        if !(sys == 'G' || sys == 'E') || k + 7 >= lines.len() || l.len() < 23 { k += 1; continue; }
         let mut v: Vec<f64> = (0..3).map(|j| num(field(l, 23 + 19 * j, 42 + 19 * j))).collect();
         for m in 1..8 {
             v.extend((0..4).map(|j| num(field(lines[k + m], 4 + 19 * j, 23 + 19 * j))));
@@ -60,12 +75,15 @@ pub fn read_nav(text: &str, out: &mut Navs) -> Result<(), String> {
         let e: Vec<f64> = l[4..23].split_whitespace().map(|x| x.parse().unwrap_or(0.0)).collect();
         if e.len() < 6 { k += 1; continue; }
         let toc_abs = gps_seconds(e[0] as i64, e[1] as i64, e[2] as i64, e[3] as i64, e[4] as i64, e[5]);
-        let sv: u8 = l[1..3].trim().parse().map_err(|_| "bad PRN")?;
+        let prn: u8 = l[1..3].trim().parse().map_err(|_| "bad PRN")?;
+        // Galileo: keep I/NAV (data sources bit 0, E1-B), the message u-blox receivers take
+        if sys == 'E' && (v[20] as i64) & 1 == 0 { k += 8; continue; }
+        let sv = sat_key(sys, prn);
         // af0 af1 af2 | IODE Crs dn M0 | Cuc e Cus sqrtA | toe Cic W0 Cis | i0 Crc w Wd |
         // IDOT L2 week L2P | acc health TGD IODC | ttx fit
         let p = [v[10], v[8], v[6], v[17], v[15], v[13], v[18], v[5], v[19], v[7], v[9], v[16], v[4], v[12], v[14]];
         let nav = Nav {
-            p, toe_abs: v[21] * WEEK + v[11], toc_abs, af0: v[0], af1: v[1], af2: v[2], iode: v[3],
+            sys, ds: if sys == 'E' { v[20] } else { 0.0 }, p, toe_abs: v[21] * WEEK + v[11], toc_abs, af0: v[0], af1: v[1], af2: v[2], iode: v[3],
             iodc: v[26], svacc: v[23], health: v[24], tgd: v[25], ttx: v[27],
         };
         let list = out.entry(sv).or_default();
@@ -86,18 +104,20 @@ fn f(v: f64) -> String {
     format!("{:>19}", format!("{mant}E{}{:02}", if e < 0 { '-' } else { '+' }, e.abs()))
 }
 
-/// RINEX 3.04 GPS navigation text from (PRN, record) pairs.
+/// RINEX 3.04 navigation text (GPS and Galileo) from (satellite key, record) pairs.
 pub fn write_nav(entries: &[(u8, Nav)], comments: &[String]) -> String {
     let (y, mo, d, h, mi, s) = calendar(crate::time::now_gps() + crate::time::UTC_GPS);
     let mut out = String::new();
-    out += "     3.04           N: GNSS NAV DATA    G: GPS              RINEX VERSION / TYPE\n";
+    let mixed = entries.iter().any(|(_, r)| r.sys == 'E');
+    out += if mixed { "     3.04           N: GNSS NAV DATA    M: MIXED            RINEX VERSION / TYPE\n" }
+           else { "     3.04           N: GNSS NAV DATA    G: GPS              RINEX VERSION / TYPE\n" };
     out += &format!("{:<20}{:<20}{:<20}PGM / RUN BY / DATE\n", "open-extended-ephem", "",
                     format!("{y:04}{mo:02}{d:02} {h:02}{mi:02}{:02} UTC", s as i64));
     for c in comments { out += &format!("{:<60}COMMENT\n", &c[..c.len().min(60)]); }
     out += &format!("{:<60}END OF HEADER\n", "");
     for (sv, r) in entries {
         let (y, mo, d, h, mi, s) = calendar(r.toc_abs);
-        out += &format!("G{sv:02} {y:04} {mo:02} {d:02} {h:02} {mi:02} {:02}{}{}{}\n",
+        out += &format!("{}{:02} {y:04} {mo:02} {d:02} {h:02} {mi:02} {:02}{}{}{}\n", r.sys, sat_prn(*sv),
                         s.round() as i64, f(r.af0), f(r.af1), f(r.af2));
         let p = &r.p;
         let rows = [
@@ -105,15 +125,15 @@ pub fn write_nav(entries: &[(u8, Nav)], comments: &[String]) -> String {
             [p[9], p[1], p[10], p[0]],
             [r.toe(), p[13], p[5], p[14]],
             [p[4], p[11], p[3], p[6]],
-            [p[8], 0.0, r.week(), 0.0],
-            [r.svacc, r.health, r.tgd, r.iodc],
+            [p[8], if r.sys == 'E' { r.ds } else { 0.0 }, r.week(), 0.0],
+            if r.sys == 'E' { [r.svacc, r.health, r.tgd, r.tgd] } else { [r.svacc, r.health, r.tgd, r.iodc] },
         ];
         for row in rows {
             out += "    ";
             for v in row { out += &f(v); }
             out += "\n";
         }
-        out += &format!("    {}{}\n", f(r.ttx), f(4.0));
+        out += &if r.sys == 'E' { format!("    {}\n", f(r.ttx)) } else { format!("    {}{}\n", f(r.ttx), f(4.0)) };
     }
     out
 }

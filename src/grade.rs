@@ -10,8 +10,16 @@ use crate::predict::sisre;
 use crate::rinex::{read_nav, Navs};
 
 pub fn run(pred: &str, truth: &[String]) -> Result<(), String> {
+    // "--system E" anywhere among the arguments grades one constellation
+    let (mut sys, mut files) = (None, vec![]);
+    let mut it = truth.iter();
+    while let Some(a) = it.next() {
+        if a == "--system" { sys = it.next().and_then(|s| s.chars().next()); } else { files.push(a.clone()); }
+    }
+    let truth = &files[..];
     let mut p = Navs::new();
     read_nav(&read_text(pred)?, &mut p)?;
+    if let Some(c) = sys { p.retain(|sv, _| crate::rinex::sat_sys(*sv) == c); }
     let mut t = Navs::new();
     for f in truth { read_nav(&read_text(f)?, &mut t)?; }
     let t0 = p.values().flatten().map(|r| r.toe_abs).fold(f64::INFINITY, f64::min) - 7200.0;
@@ -50,6 +58,6 @@ pub fn run(pred: &str, truth: &[String]) -> Result<(), String> {
         d += 0.5;
     }
     worst.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-    println!("worst satellites: {}", worst.iter().take(5).map(|(s, v)| format!("G{s:02} {v:.1} m")).collect::<Vec<_>>().join(", "));
+    println!("worst satellites: {}", worst.iter().take(5).map(|(s, v)| format!("{} {v:.1} m", crate::rinex::sat_name(*s))).collect::<Vec<_>>().join(", "));
     Ok(())
 }

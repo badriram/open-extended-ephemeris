@@ -117,3 +117,55 @@ pub fn ini_pos_llh(lat: f64, lon: f64, alt_m: f64, acc_m: f64) -> Vec<u8> {
     b.extend_from_slice(&((acc_m * 100.0).round().max(0.0) as u32).to_le_bytes());
     frame(0x13, 0x40, &b)
 }
+
+/// Galileo SISA index for an accuracy in metres (Galileo OS SIS ICD): 1 cm steps to 0.5 m, 2 cm
+/// to 1 m, 4 cm to 2 m, 16 cm to 6 m. Beyond 6 m the ICD has only "no accuracy prediction
+/// available" (255), which receivers may treat as unusable, so predictions are capped at 6 m.
+pub fn sisa_index(metres: f64) -> u8 {
+    let cm = (metres * 100.0).max(0.0);
+    (if cm < 50.0 { cm } else if cm < 100.0 { 50.0 + (cm - 50.0) / 2.0 }
+     else if cm < 200.0 { 75.0 + (cm - 100.0) / 4.0 } else { (100.0 + (cm - 200.0) / 16.0).min(125.0) }).round() as u8
+}
+
+/// The 76-byte UBX-MGA-GAL-EPH payload (0x13 0x02) for a Galileo I/NAV record. Galileo's own
+/// resolutions: toe and toc in 60 s, af0 2^-34 s, af1 2^-46, af2 2^-59, BGD 2^-32 s.
+pub fn galeph_payload(r: &Nav, prn: u8) -> Result<[u8; 76], String> {
+    let s = 1.0 / PI;
+    let p = &r.p;
+    let i32r = (i32::MIN as f64, i32::MAX as f64);
+    let u32r = (0.0, u32::MAX as f64);
+    let i16r = (i16::MIN as f64, i16::MAX as f64);
+    let u16r = (0.0, u16::MAX as f64);
+    let i8r = (i8::MIN as f64, i8::MAX as f64);
+    let mut b = [0u8; 76];
+    let mut put = |off: usize, bytes: &[u8]| b[off..off + bytes.len()].copy_from_slice(bytes);
+    put(0, &[0x01, 0x00, prn, 0]);                                                   // type, version, svId
+    put(4, &((r.iodc as u16) & 0x3FF).to_le_bytes());                                // IODnav
+    put(6, &(q(p[7] * s, 2f64.powi(-43), i16r.0, i16r.1)? as i16).to_le_bytes());    // deltaN
+    put(8, &(q(p[2] * s, 2f64.powi(-31), i32r.0, i32r.1)? as i32).to_le_bytes());    // M0
+    put(12, &(q(p[1], 2f64.powi(-33), u32r.0, u32r.1)? as u32).to_le_bytes());       // e
+    put(16, &(q(p[0], 2f64.powi(-19), u32r.0, u32r.1)? as u32).to_le_bytes());       // sqrtA
+    put(20, &(q(p[5] * s, 2f64.powi(-31), i32r.0, i32r.1)? as i32).to_le_bytes());   // Omega0
+    put(24, &(q(p[4] * s, 2f64.powi(-31), i32r.0, i32r.1)? as i32).to_le_bytes());   // i0
+    put(28, &(q(p[3] * s, 2f64.powi(-31), i32r.0, i32r.1)? as i32).to_le_bytes());   // omega
+    put(32, &(q(p[6] * s, 2f64.powi(-43), i32r.0, i32r.1)? as i32).to_le_bytes());   // OmegaDot
+    put(36, &(q(p[8] * s, 2f64.powi(-43), i16r.0, i16r.1)? as i16).to_le_bytes());   // IDOT
+    put(38, &(q(p[9], 2f64.powi(-29), i16r.0, i16r.1)? as i16).to_le_bytes());       // cuc
+    put(40, &(q(p[10], 2f64.powi(-29), i16r.0, i16r.1)? as i16).to_le_bytes());      // cus
+    put(42, &(q(p[11], 2f64.powi(-5), i16r.0, i16r.1)? as i16).to_le_bytes());       // crc
+    put(44, &(q(p[12], 2f64.powi(-5), i16r.0, i16r.1)? as i16).to_le_bytes());       // crs
+    put(46, &(q(p[13], 2f64.powi(-29), i16r.0, i16r.1)? as i16).to_le_bytes());      // cic
+    put(48, &(q(p[14], 2f64.powi(-29), i16r.0, i16r.1)? as i16).to_le_bytes());      // cis
+    put(50, &(q(r.toe(), 60.0, u16r.0, u16r.1)? as u16).to_le_bytes());
+    put(52, &(q(r.af0, 2f64.powi(-34), i32r.0, i32r.1)? as i32).to_le_bytes());
+    put(56, &(q(r.af1, 2f64.powi(-46), i32r.0, i32r.1)? as i32).to_le_bytes());
+    put(60, &[(q(r.af2, 2f64.powi(-59), i8r.0, i8r.1)? as i8) as u8, sisa_index(r.svacc)]);
+    put(62, &(q(r.toc(), 60.0, u16r.0, u16r.1)? as u16).to_le_bytes());
+    put(64, &(q(r.tgd, 2f64.powi(-32), i16r.0, i16r.1)? as i16).to_le_bytes());      // BGD E1/E5b
+    put(68, &[0, 0, 0, 0]);                                                          // health and data validity: OK
+    Ok(b)
+}
+
+pub fn galeph_frame(r: &Nav, prn: u8) -> Result<Vec<u8>, String> {
+    Ok(frame(0x13, 0x02, &galeph_payload(r, prn)?))
+}

@@ -6,6 +6,7 @@ use crate::{casic, erfa, lnav, linalg::norm, linalg::sub, ubx};
 /// GPS PRN 8, toe 597600 s of week 2440 (2026-10-17): an IGS broadcast record (BKG).
 fn g08() -> Nav {
     Nav {
+        sys: 'G', ds: 0.0,
         p: [5.153788942337e+03, 1.200759038329e-02, -5.089273876685e-02, 5.557069962041e-01,
             9.405815259674e-01, -2.051075803723e+00, -8.409278851647e-09, 5.086283292686e-09,
             -3.828730910582e-10, 2.665445208549e-06, 7.318332791328e-06, 2.244062500000e+02,
@@ -50,7 +51,7 @@ fn lnav_fit_recovers_a_broadcast_orbit() {
     let g = g08();
     let ts: Vec<f64> = (0..49).map(|i| g.toe_abs - 7200.0 + 300.0 * i as f64).collect();
     let xs: Vec<_> = ts.iter().map(|&t| lnav::sat_pos(&g.p, g.toe_abs, t)).collect();
-    let (q, rms) = lnav::fit(&ts, &xs, g.toe_abs);
+    let (q, rms) = lnav::fit(&ts, &xs, g.toe_abs, lnav::GM);
     assert!(rms < 1e-3, "rms {rms}");
     let worst = (0..=240).map(|i| g.toe_abs - 7200.0 + 60.0 * i as f64)
         .map(|t| norm(sub(lnav::sat_pos(&q, g.toe_abs, t), lnav::sat_pos(&g.p, g.toe_abs, t))))
@@ -111,4 +112,49 @@ fn ubx_init_messages() {
     assert_eq!(p.len(), 8 + 20);
     assert_eq!(i32::from_le_bytes([p[10], p[11], p[12], p[13]]), 125_000_000);
     assert_eq!(ubx::check_frames(&[f, p].concat()).unwrap(), 2);
+}
+
+/// Galileo E18, I/NAV, toe 172200 s of week 2440 (2026-10-12): an IGS broadcast record (BKG). E18 is
+/// one of the two satellites left in an eccentric orbit (e = 0.17) by their 2014 launch.
+fn e18() -> Nav {
+    Nav {
+        sys: 'E', ds: 517.0,
+        p: [5.289363780975e+03, 1.686801413307e-01, -2.334321727584e+00, -3.075230019880e+00,
+            8.506420363581e-01, -1.936406207708e+00, -6.559916103979e-09, 5.481656904442e-09,
+            -5.500229106620e-11, 4.220753908157e-06, 3.136694431305e-06, 2.936250000000e+02,
+            9.206250000000e+01, -3.919005393982e-06, -1.536682248116e-06],
+        toe_abs: 2440.0 * 604800.0 + 172200.0, toc_abs: 2440.0 * 604800.0 + 172200.0,
+        af0: 3.330531530082e-03, af1: 4.246203388902e-11, af2: 0.0, iode: 33.0, iodc: 33.0,
+        svacc: 3.12, health: 0.0, tgd: -3.958120942116e-09, ttx: 0.0,
+    }
+}
+
+#[test]
+fn galileo_round_trip_and_ubx() {
+    let e = e18();
+    let text = write_nav(&[(crate::rinex::sat_key('E', 18), e.clone())], &[]);
+    assert!(text.contains("M: MIXED") || text.contains("E18 "));
+    let mut navs = Navs::new();
+    read_nav(&text, &mut navs).unwrap();
+    let r = &navs[&118][0];
+    assert_eq!(r.sys, 'E');
+    for k in 0..15 { assert!((r.p[k] - e.p[k]).abs() <= e.p[k].abs() * 1e-11 + 1e-20, "param {k}"); }
+    // every field of a real record lands exactly on MGA-GAL-EPH's grid
+    let b = ubx::galeph_payload(r, 18).unwrap();
+    let i32_ = |o: usize| i32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) as f64;
+    let u32_ = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) as f64;
+    let i16_ = |o: usize| i16::from_le_bytes([b[o], b[o + 1]]) as f64;
+    assert_eq!((b[0], b[1], b[2]), (1, 0, 18));
+    assert!((u32_(16) * 2f64.powi(-19) - e.p[0]).abs() < 1e-9);                 // sqrtA
+    assert!((u32_(12) * 2f64.powi(-33) - e.p[1]).abs() < 1e-12);                // e
+    assert!((i32_(52) * 2f64.powi(-34) - e.af0).abs() < 1e-15);                 // af0
+    assert!((i32_(56) * 2f64.powi(-46) - e.af1).abs() < 1e-20);                 // af1
+    assert!((i16_(64) * 2f64.powi(-32) - e.tgd).abs() < 1e-15);                 // BGD
+    assert_eq!(u16::from_le_bytes([b[50], b[51]]), (172200 / 60) as u16);     // toe in 60 s
+    assert_eq!(b[61], 100 + ((312 - 200) / 16) as u8);                          // SISA 3.12 m
+    assert_eq!(ubx::check_frames(&ubx::galeph_frame(r, 18).unwrap()).unwrap(), 1);
+    // Galileo orbits use Galileo's GM: the same parameters under GPS's GM drift apart
+    let t = e.toe_abs + 7200.0;
+    let d = norm(sub(r.pos(t), lnav::sat_pos(&r.p, r.toe_abs, t)));
+    assert!(d > 0.5, "GM difference shows after 2 h: {d} m");
 }

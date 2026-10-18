@@ -5,17 +5,22 @@ use crate::linalg::*;
 use crate::time::WEEK;
 
 pub const GM: f64 = 3.986005e14;          // IS-GPS-200's values, which receivers use
+pub const GM_GAL: f64 = 3.986004418e14;   // Galileo OS SIS ICD
 pub const OMEGA_E: f64 = 7.2921151467e-5;
 
 /// Orbit parameters in this order: sqrtA, e, M0, omega, i0, Omega0, OmegaDot, deltaN, IDOT,
 /// Cuc, Cus, Crc, Crs, Cic, Cis (angles in radians).
 pub type Params = [f64; 15];
 
-pub fn sat_pos(p: &Params, toe: f64, t: f64) -> V3 {
+#[allow(dead_code)]
+pub fn sat_pos(p: &Params, toe: f64, t: f64) -> V3 { sat_pos_gm(p, toe, t, GM) }
+
+/// As sat_pos, with the system's gravitational constant (GM for GPS, GM_GAL for Galileo).
+pub fn sat_pos_gm(p: &Params, toe: f64, t: f64, gm: f64) -> V3 {
     let [sqrt_a, e, m0, w, i0, w0, wd, dn, idot, cuc, cus, crc, crs, cic, cis] = *p;
     let a = sqrt_a * sqrt_a;
     let tk = t - toe;
-    let m = m0 + ((GM / (a * a * a)).sqrt() + dn) * tk;
+    let m = m0 + ((gm / (a * a * a)).sqrt() + dn) * tk;
     let mut ea = m;
     for _ in 0..12 { ea -= (ea - e * ea.sin() - m) / (1.0 - e * ea.cos()); }
     let phi = ((1.0 - e * e).sqrt() * ea.sin()).atan2(ea.cos() - e) + w;
@@ -31,16 +36,16 @@ pub fn sat_pos(p: &Params, toe: f64, t: f64) -> V3 {
 }
 
 /// Osculating elements, in broadcast form, from an ECEF state at toe: the fit's starting point.
-fn elements(r: V3, v_ecef: V3, toe: f64) -> Params {
+fn elements(r: V3, v_ecef: V3, toe: f64, gm: f64) -> Params {
     let v = add(v_ecef, cross([0.0, 0.0, OMEGA_E], r));
     let h = cross(r, v);
     let hn = norm(h);
     let i = (h[2] / hn).acos();
     let node = cross([0.0, 0.0, 1.0], h);
     let nhat = unit(node);
-    let ev = sub(scale(cross(v, h), 1.0 / GM), unit(r));
+    let ev = sub(scale(cross(v, h), 1.0 / gm), unit(r));
     let e = norm(ev);
-    let a = 1.0 / (2.0 / norm(r) - dot(v, v) / GM);
+    let a = 1.0 / (2.0 / norm(r) - dot(v, v) / gm);
     let w = (dot(cross(nhat, ev), h) / hn).atan2(dot(nhat, ev));
     let u = (dot(cross(nhat, r), h) / hn).atan2(dot(nhat, r));
     let nu = u - w;
@@ -75,18 +80,18 @@ fn from_ns(q: &Params) -> Params {
 /// Fit ephemeris parameters to positions (ECEF, m) at times spanning toe ± 2 h, by Levenberg-
 /// Marquardt with a central-difference Jacobian (steps of ~1 cm: much smaller steps drown in
 /// rounding at GPS distances). Returns (parameters, rms residual in metres).
-pub fn fit(ts: &[f64], xs: &[V3], toe: f64) -> (Params, f64) {
+pub fn fit(ts: &[f64], xs: &[V3], toe: f64, gm: f64) -> (Params, f64) {
     let n = ts.len();
     let k = (0..n).min_by(|&a, &b| (ts[a] - toe).abs().partial_cmp(&(ts[b] - toe).abs()).unwrap()).unwrap().clamp(1, n - 2);
     let vel = scale(sub(xs[k + 1], xs[k - 1]), 1.0 / (ts[k + 1] - ts[k - 1]));
-    let mut p0 = elements(xs[k], vel, ts[k]);
-    p0[2] += (GM / p0[0].powi(6)).sqrt() * (toe - ts[k]);
+    let mut p0 = elements(xs[k], vel, ts[k], gm);
+    p0[2] += (gm / p0[0].powi(6)).sqrt() * (toe - ts[k]);
     let q0 = to_ns(&p0);
     let resid = |d: &Params| -> Vec<f64> {
         let mut q = q0;
         for j in 0..15 { q[j] += d[j] * SCALE[j]; }
         let p = from_ns(&q);
-        ts.iter().zip(xs).flat_map(|(&t, &x)| sub(sat_pos(&p, toe, t), x)).collect()
+        ts.iter().zip(xs).flat_map(|(&t, &x)| sub(sat_pos_gm(&p, toe, t, gm), x)).collect()
     };
     let m = 3 * n;
     let mut d = [0.0; 15];
