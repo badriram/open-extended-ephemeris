@@ -1,9 +1,8 @@
 # Publish a week of predicted GPS orbit data to the ephemeris-data branch:
 #   https://raw.githubusercontent.com/badriram/open-extended-ephemeris/ephemeris-data/gps-7d.rnx
-#   .../gps-7d-casic.bin   .../gps-7d.json   .../fit-state.json
-# Manual only for now: a run is ~6 minutes on 14 cores and far longer on GitHub's 4-core runners.
-# When it is faster, add a schedule after each IGS ultra-rapid issue (00, 06, 12, 18 UTC, about
-# three hours late), e.g.  schedule: [{cron: "30 4,10,16,22 * * *"}]
+#   .../gps-7d-casic.bin   .../gps-7d.json   .../fit-state.txt
+# Manual only for now. When scheduled, run after each IGS ultra-rapid issue (00, 06, 12, 18 UTC,
+# about three hours late), e.g.  schedule: [{cron: "30 4,10,16,22 * * *"}]
 name: publish
 on:
   workflow_dispatch:
@@ -15,17 +14,14 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install -r requirements.txt
+      - run: cargo build --release
       - name: Start from the previous run's fits, if there is one
-        run: curl -sfL -o warm.json "https://raw.githubusercontent.com/${{ github.repository }}/ephemeris-data/fit-state.json" || rm -f warm.json
+        run: curl -sfL -o warm.txt "https://raw.githubusercontent.com/${{ github.repository }}/ephemeris-data/fit-state.txt" || rm -f warm.txt
       - name: Predict seven days
-        run: python3 -m extended_ephemeris --out out $( [ -f warm.json ] && echo --warm warm.json )
+        run: ./target/release/extended-ephemeris --out out $( [ -f warm.txt ] && echo --warm warm.txt )
       - name: Publish to ephemeris-data
         run: |
           cd out

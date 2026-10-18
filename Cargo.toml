@@ -1,0 +1,19 @@
+[package]
+name = "open-extended-ephemeris"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Offline rapid cold start for GPS: extended ephemeris predicted a week ahead from IGS orbits"
+repository = "https://github.com/badriram/open-extended-ephemeris"
+build = "build.rs"
+
+[[bin]]
+name = "extended-ephemeris"
+path = "src/main.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
