@@ -10,12 +10,13 @@ Keep both current when a result changes.
 
 - `src/predict.rs` — the pipeline: IGS ultra-rapid orbit + ERP + broadcasts in; per satellite, fit
   the force model, propagate, fit an LNAV record every 2 h, calibrate, predict the clock; write
-  `gps-7d.rnx`, `gps-7d-casic.bin`, `gps-7d.json`, `fit-state.txt`.
+  `gps-7d.rnx`, `gps-7d-ubx.bin`, `gps-7d-casic.bin`, `gps-7d.json`, `fit-state.txt`.
 - `src/orbit.rs` — force model (gravity + solid tide, Sun, Moon, relativity, ECOM2 radiation
   pressure with a smooth penumbra), fixed-step DOP853, Levenberg-Marquardt fit with priors.
 - `src/eo.rs` — Earth orientation (ERFA, IGS ERP, IERS Bulletin A), Sun/Moon tables.
 - `src/lnav.rs` — IS-GPS-200 broadcast ephemeris: evaluate and fit.
-- `src/rinex.rs`, `src/sp3.rs`, `src/casic.rs` — file formats. `src/fetch.rs` — curl/gzip.
+- `src/rinex.rs`, `src/sp3.rs`, `src/casic.rs`, `src/ubx.rs` — file formats. `src/fetch.rs` — curl/gzip.
+- `src/select.rs` — `select`: the ready-to-send burst (time, position, current frames) per receiver.
 - `src/grade.rs`, `src/clockbt.rs` — `grade` and `clock-backtest` subcommands.
 - `vendor/erfa/` — 37 ERFA 2.0.1 files, **unmodified**, BSD-3-Clause, compiled by `build.rs`.
 - `.github/workflows/publish.yml` — runs four times a day and force-pushes the outputs to the

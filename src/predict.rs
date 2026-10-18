@@ -419,6 +419,10 @@ pub fn run(o: &Options) -> Result<(), String> {
     std::fs::create_dir_all(&o.out).map_err(|e| e.to_string())?;
     let path = |f: &str| format!("{}/{f}", o.out.trim_end_matches('/'));
     std::fs::write(path("gps-7d-casic.bin"), &blob).map_err(|e| e.to_string())?;
+    let mut ublob = Vec::new();
+    for (sv, n) in &entries { ublob.extend(crate::ubx::gpseph_frame(n, *sv)?); }
+    crate::ubx::check_frames(&ublob)?;
+    std::fs::write(path("gps-7d-ubx.bin"), &ublob).map_err(|e| e.to_string())?;
     std::fs::write(path("gps-7d.rnx"), rinex::write_nav(&entries, &[
         "PREDICTED broadcast ephemeris (extended ephemeris), not".into(),
         "broadcast by the satellites. From IGS ultra-rapid orbit".into(),
@@ -454,6 +458,7 @@ pub fn run(o: &Options) -> Result<(), String> {
   "satellites": [{sats}],
   "records": {nrec},
   "casic_bytes": {nb},
+  "ubx_bytes": {nub},
   "force_model_fit_m": {{"median": {fm:.4}, "worst": {fw:.4}}},
   "fits": {{"cold": {cold}, "warm": {warm_}, "warm_rejected": {rej}, "not_converged": {nc}, "iterations_median": {im}}},
   "satellite_seconds": {{"median": {sm:.2}, "total": {st:.1}}},
@@ -463,7 +468,7 @@ pub fn run(o: &Options) -> Result<(), String> {
 }}
 "#, made = iso_utc(now), bc = used.iter().map(|u| format!("\"{u}\"")).collect::<Vec<_>>().join(", "),
         ps = iso_utc(pred_start), vu = iso_utc(t_end), ipu = iso_utc(t_arc_end), sats = sats.join(", "),
-        nrec = entries.len(), nb = blob.len(), fm = median(&mut fits), fw = worst_fit,
+        nrec = entries.len(), nb = blob.len(), nub = ublob.len(), fm = median(&mut fits), fw = worst_fit,
         cold = count("cold"), warm_ = count("warm"), rej = count("warm-rejected"),
         nc = results.values().filter(|r| !r.converged).count(), im = median(&mut iters),
         sm = median(&mut secs.clone()), st = secs.iter().sum::<f64>(), rs = t_run.elapsed().as_secs_f64(),

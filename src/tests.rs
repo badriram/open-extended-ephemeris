@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Unit tests: cargo test
 use crate::rinex::{read_nav, write_nav, Nav, Navs};
-use crate::{casic, erfa, lnav, linalg::norm, linalg::sub};
+use crate::{casic, erfa, lnav, linalg::norm, linalg::sub, ubx};
 
 /// GPS PRN 8, toe 597600 s of week 2440 (2026-10-17): an IGS broadcast record (BKG).
 fn g08() -> Nav {
@@ -67,4 +67,48 @@ fn erfa_values_match_pyerfa() {
     assert!((norm(e) - 1.0).abs() < 0.02, "Earth-Sun distance {}", norm(e));
     let m = erfa::moon_geocentric(2460960.5, 1.5);
     assert!(norm(m) > 0.0023 && norm(m) < 0.0028, "Earth-Moon distance {}", norm(m));
+}
+
+#[test]
+fn ubx_checksum_matches_a_known_message() {
+    // UBX-MON-VER poll, as printed in u-blox's interface descriptions: B5 62 0A 04 00 00 0E 34
+    assert_eq!(hex(&ubx::frame(0x0A, 0x04, &[])), "b5620a0400000e34");
+}
+
+#[test]
+fn ubx_and_casic_carry_the_same_integers() {
+    let g = g08();
+    let u = ubx::gpseph_payload(&g, 8).unwrap();
+    let c = casic::gpseph_payload(&g, 8).unwrap();
+    let u32_ = |b: &[u8], o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
+    let u16_ = |b: &[u8], o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
+    // (ubx offset, casic offset, width): sqrtA e omega M0 i0 Omega0 OmegaDot / deltaN IDOT cuc cus
+    // crc crs cic cis toe / af0 / af1 / af2 tgd / iodc
+    for (uo, co) in [(36, 4), (32, 8), (56, 12), (24, 16), (52, 20), (44, 24), (60, 28), (16, 56)] {
+        assert_eq!(u32_(&u, uo), u32_(&c, co), "u32 at ubx {uo}");
+    }
+    for (uo, co) in [(22, 32), (64, 34), (28, 36), (30, 38), (50, 40), (20, 42), (42, 44), (48, 46), (40, 48), (14, 60), (8, 64)] {
+        assert_eq!(u16_(&u, uo), u16_(&c, co), "u16 at ubx {uo}");
+    }
+    assert_eq!((u[13], u[7]), (c[62], c[63]));                 // af2, tgd
+    assert_eq!(u16_(&u, 10) as u32, u32_(&c, 52));              // toc
+    assert_eq!((u[0], u[1], u[2], u[5], u[6]), (1, 0, 8, c[66], c[67]));
+    let f = ubx::gpseph_frame(&g, 8).unwrap();
+    assert_eq!(f.len(), 76);
+    assert_eq!(ubx::check_frames(&f).unwrap(), 1);
+}
+
+#[test]
+fn ubx_init_messages() {
+    // 2026-10-17 22:00:00 UTC, as GPS seconds
+    let t = crate::time::gps_seconds(2026, 10, 17, 22, 0, 18.0);
+    let f = ubx::ini_time_utc(t, 2.0);
+    assert_eq!(f.len(), 8 + 24);
+    assert_eq!(&f[6..10], &[0x10, 0x00, 0x00, 18]);
+    assert_eq!(u16::from_le_bytes([f[10], f[11]]), 2026);
+    assert_eq!(&f[12..17], &[10, 17, 22, 0, 0]);
+    let p = ubx::ini_pos_llh(12.5, -45.25, 100.0, 5000.0);
+    assert_eq!(p.len(), 8 + 20);
+    assert_eq!(i32::from_le_bytes([p[10], p[11], p[12], p[13]]), 125_000_000);
+    assert_eq!(ubx::check_frames(&[f, p].concat()).unwrap(), 2);
 }

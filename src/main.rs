@@ -14,8 +14,10 @@ mod lnav;
 mod orbit;
 mod predict;
 mod rinex;
+mod select;
 mod sp3;
 mod time;
+mod ubx;
 #[cfg(test)]
 mod tests;
 
@@ -29,10 +31,15 @@ usage:
                      [--no-tides] [--no-relativity] [--srp-sigma S1,...,S9]
                      [--eop BULLETIN-A-FILE|URL|none]
   extended-ephemeris grade PREDICTED.rnx BROADCAST.rnx[.gz] ...
+  extended-ephemeris select --format ubx|casic --out FILE [--at YYYY-MM-DDTHH:MMZ]
+                     [--position LAT,LON[,HEIGHT]] [PREDICTED.rnx|URL]
   extended-ephemeris clock-backtest [--models quad:5,line:1,...] [--every HOURS] BROADCAST.rnx[.gz] ...
 
 predict (the default) fetches the newest IGS ultra-rapid orbit and the broadcasts it needs from
-BKG, and writes gps-7d.rnx, gps-7d-casic.bin, gps-7d.json and fit-state.txt to --out (default .).
+BKG, and writes gps-7d.rnx, gps-7d-casic.bin, gps-7d-ubx.bin, gps-7d.json and fit-state.txt to
+--out (default .).
+select writes a ready-to-send burst (time, optional position, the ephemerides for now) for a
+u-blox or CASIC receiver, from a predicted RINEX file (default: the published one).
 grade compares a predicted RINEX file with what the satellites broadcast.
 clock-backtest tests clock models against a span of broadcast history (a year of daily files).
 Needs curl and gzip on the path.";
@@ -44,6 +51,7 @@ fn main() {
         Some("grade") if args.len() >= 3 => grade::run(&args[1], &args[2..]),
         Some("grade") => Err(USAGE.into()),
         Some("clock-backtest") => clockbt::run(&args[1..]),
+        Some("select") => select::run(&args[1..]),
         _ => parse(if args.first().map(String::as_str) == Some("predict") { &args[1..] } else { &args })
             .and_then(|o| predict::run(&o)),
     };

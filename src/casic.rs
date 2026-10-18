@@ -94,3 +94,21 @@ pub fn check_frames(buf: &[u8]) -> Result<usize, String> {
     }
     Ok(n)
 }
+
+/// CASIC AID-INI (0x0B 0x01, 56 bytes): time, and optionally a rough position (latitude and
+/// longitude in degrees, height in metres), sent about a second after the receiver starts and
+/// before the ephemerides. Layout as in the L76K library, whose measurements it was used for.
+pub fn aid_ini(t_gps: f64, time_acc_s: f32, pos: Option<(f64, f64, f64, f32)>) -> Vec<u8> {
+    let mut b = [0u8; 56];
+    let (lat, lon, h, acc) = pos.unwrap_or((0.0, 0.0, 0.0, 0.0));
+    b[0..8].copy_from_slice(&lat.to_le_bytes());
+    b[8..16].copy_from_slice(&lon.to_le_bytes());
+    b[16..24].copy_from_slice(&h.to_le_bytes());
+    b[24..32].copy_from_slice(&t_gps.rem_euclid(604800.0).floor().to_le_bytes());
+    b[36..40].copy_from_slice(&acc.to_le_bytes());
+    b[40..44].copy_from_slice(&time_acc_s.to_le_bytes());
+    b[52..54].copy_from_slice(&((t_gps / 604800.0).floor() as u16).to_le_bytes());
+    // flags: bit 1 time valid; with a position, bit 0 position valid and bit 5 LLA
+    b[55] = if pos.is_some() { 0x23 } else { 0x02 };
+    frame(0x0B, 0x01, &b)
+}

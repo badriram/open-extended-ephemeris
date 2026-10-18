@@ -83,6 +83,7 @@ That fetches the newest IGS ultra-rapid orbit and the broadcasts it needs from B
 | file | what |
 | --- | --- |
 | `gps-7d.rnx` | the predicted records as **RINEX 3.04** navigation data: 32 satellites, one every 2 h, 7 days |
+| `gps-7d-ubx.bin` | the same as **u-blox UBX-MGA-GPS-EPH** frames (207 kB) for u-blox M8, M9 and M10 receivers |
 | `gps-7d-casic.bin` | the same as **CASIC MSG-GPSEPH** frames (223 kB) for AT6558 receivers: Quectel L76K, ATGM336H and others |
 | `gps-7d.json` | when and from what it was made, fit quality, and a self-check against the satellites' current broadcasts (the run fails if that check is off) |
 | `fit-state.txt` | each satellite's fitted state and recent broadcast clocks (~100 kB); `--warm fit-state.txt` starts the next run from it, and the run then needs only the newest broadcasts |
@@ -98,11 +99,23 @@ grades a prediction against what the satellites broadcast, and `extended-ephemer
 BROADCAST.rnx.gz ...` tests clock models over any span of broadcast history (BKG keeps a week of daily files at
 `https://igs.bkg.bund.de/root_ftp/IGS/BRDC/<year>/<day>/BRDC00WRD_S_<year><day>0000_01D_MN.rnx.gz`).
 
-A receiver wants, for each satellite, the record whose reference time (toe) is nearest now. For
-the L76K, [l76k-at6558-agnss](https://github.com/badriram/l76k-at6558-agnss) has a C function,
+A receiver wants the time, ideally a rough position, and for each satellite the record whose
+reference time (toe) is nearest now. `select` writes exactly that, ready to send down a serial
+port:
+
+```bash
+# from the published week, for now (or --at 2026-10-23T12:00Z), with an optional rough position
+./target/release/extended-ephemeris select --format ubx --out assist.ubx --position LAT,LON
+./target/release/extended-ephemeris select --format casic --out assist.bin --position LAT,LON
+```
+
+For u-blox that is UBX-MGA-INI-TIME_UTC, UBX-MGA-INI-POS_LLH if a position was given, then one
+UBX-MGA-GPS-EPH per satellite (about 2.5 kB); the receiver needs the time first, since MGA-GPS-EPH
+carries no week number. For CASIC it is AID-INI then MSG-GPSEPH. For the L76K, [l76k-at6558-agnss](https://github.com/badriram/l76k-at6558-agnss) has a C function,
 `casic_eph_select()`, that picks them from `gps-7d-casic.bin`, and the measurements showing that
-the receiver accepts injected orbit data and cold-starts in ~6 s with it. Other receivers' formats
-(u-blox UBX-MGA-GPS-EPH and so on) can be written from the same records.
+the receiver accepts injected orbit data and cold-starts in ~6 s with it. The u-blox messages
+follow u-blox's interface descriptions, checked field by field against
+[pyubx2](https://github.com/semuconsulting/pyubx2); no u-blox receiver has been given them yet.
 
 ## Publishing
 
@@ -112,6 +125,7 @@ run starts from the previous one's `fit-state.txt`, so it downloads only the new
 The branch holds only the latest files:
 
 - `https://raw.githubusercontent.com/badriram/open-extended-ephemeris/ephemeris-data/gps-7d.rnx`
+- `https://raw.githubusercontent.com/badriram/open-extended-ephemeris/ephemeris-data/gps-7d-ubx.bin`
 - `https://raw.githubusercontent.com/badriram/open-extended-ephemeris/ephemeris-data/gps-7d-casic.bin`
 - `https://raw.githubusercontent.com/badriram/open-extended-ephemeris/ephemeris-data/gps-7d.json`
 
