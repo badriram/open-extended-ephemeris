@@ -1,0 +1,46 @@
+# Publish a week of predicted GPS orbit data to the ephemeris-data branch:
+#   https://raw.githubusercontent.com/badriram/open-extended-ephemeris/ephemeris-data/gps-7d.rnx
+#   .../gps-7d-casic.bin   .../gps-7d.json   .../fit-state.json
+# Manual only for now: a run is ~6 minutes on 14 cores and far longer on GitHub's 4-core runners.
+# When it is faster, add a schedule after each IGS ultra-rapid issue (00, 06, 12, 18 UTC, about
+# three hours late), e.g.  schedule: [{cron: "30 4,10,16,22 * * *"}]
+name: publish
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: publish
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Start from the previous run's fits, if there is one
+        run: curl -sfL -o warm.json "https://raw.githubusercontent.com/${{ github.repository }}/ephemeris-data/fit-state.json" || rm -f warm.json
+      - name: Predict seven days
+        run: python3 -m extended_ephemeris --out out $( [ -f warm.json ] && echo --warm warm.json )
+      - name: Publish to ephemeris-data
+        run: |
+          cd out
+          cp ../LICENSE .
+          printf '%s\n' \
+            '# Predicted GPS orbit data (extended ephemeris)' '' \
+            'A week of GPS broadcast-style ephemerides predicted from the newest IGS ultra-rapid orbit by' \
+            'https://github.com/badriram/open-extended-ephemeris. These are predictions, not the' \
+            "satellites' own broadcasts. gps-7d.rnx is RINEX 3.04; gps-7d-casic.bin is CASIC MSG-GPSEPH" \
+            'frames for AT6558 receivers (Quectel L76K); gps-7d.json says when and from what it was made,' \
+            "with a self-check against the satellites' broadcasts. This branch holds only the latest." '' \
+            'Orbit and clock data: International GNSS Service (IGS), via BKG. MIT licence (see LICENSE).' > README.md
+          git init -q -b ephemeris-data
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Predicted GPS orbit data, $(jq -r .prediction_starts gps-7d.json)"
+          git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ephemeris-data
