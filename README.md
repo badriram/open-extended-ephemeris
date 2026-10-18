@@ -29,7 +29,9 @@ twice it.
 So after five days offline, a first fix is typically a few metres out, and the receiver replaces
 the prediction with the satellites' own data once it has tracked them for about 30 s. These
 figures are at least as good as every published consumer-grade extended-ephemeris result we
-found. Days 5-7 have not been graded yet, and no receiver has yet been given predicted records
+found. The clock model alone was also tested over the whole of 2025 (every 6 hours, 32 satellites,
+[results](results/2025-clock-backtest.md)): day 4-5 clock error median 2.0 m, 95th percentile 13 m,
+with no seasonal variation. Days 5-7 have not been graded yet, and no receiver has yet been given predicted records
 (they are ordinary records with a current reference time, which receivers accept from other
 sources).
 
@@ -92,7 +94,8 @@ Other options: `--sp3 FILE|URL --erp FILE|URL` and `--rinex FILE|URL ...` to pre
 files, `--eop FILE|URL|none` (Bulletin A; default the latest from the IERS), `--days N`, `--jobs N`,
 and for experiments `--clock line|harmonic|harmonic-drift|broadcast-line:DAYS|broadcast-quad:DAYS`,
 `--srp-sigma S1,...,S9`, `--no-tides` and `--no-relativity`. `extended-ephemeris grade PREDICTED.rnx BROADCAST.rnx.gz ...`
-grades a prediction against what the satellites broadcast (BKG keeps a week of daily files at
+grades a prediction against what the satellites broadcast, and `extended-ephemeris clock-backtest
+BROADCAST.rnx.gz ...` tests clock models over any span of broadcast history (BKG keeps a week of daily files at
 `https://igs.bkg.bund.de/root_ftp/IGS/BRDC/<year>/<day>/BRDC00WRD_S_<year><day>0000_01D_MN.rnx.gz`).
 
 A receiver wants, for each satellite, the record whose reference time (toe) is nearest now. For

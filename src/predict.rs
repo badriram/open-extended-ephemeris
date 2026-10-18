@@ -140,28 +140,7 @@ fn predict_sat(sv: u8, tr: &Track, recs: &[Nav], eo: &EarthOrientation, t_end: f
         let pts: Vec<(f64, f64)> = all.iter().map(|(&t, &c)| (t as f64, c))
             .filter(|&(t, _)| t >= from && t <= pred_start + LATENCY)
             .map(|(t, c)| (t - pred_start, c)).collect();
-        if pts.len() < 6 { return None; }
-        let m = if quad { 3 } else { 2 };
-        let fit = |use_: &dyn Fn(usize) -> bool| -> Vec<f64> {
-            let (mut nm, mut g) = (vec![0.0; m * m], vec![0.0; m]);
-            for (k, &(t, y)) in pts.iter().enumerate() {
-                if !use_(k) { continue; }
-                let b = [1.0, t, t * t];
-                for i in 0..m { g[i] += b[i] * y; for j in 0..m { nm[i * m + j] += b[i] * b[j]; } }
-            }
-            solve(m, &nm, &g)
-        };
-        let eval = |c: &[f64], t: f64| c[0] + c[1] * t + if m == 3 { c[2] * t * t } else { 0.0 };
-        let mut c = fit(&|_| true);
-        // Drop points far from the fit (a clock jump or a bad upload), then refit: up to 3 rounds.
-        for _ in 0..3 {
-            let mut r: Vec<f64> = pts.iter().map(|&(t, y)| (y - eval(&c, t)).abs()).collect();
-            let lim = 4.0 * 1.4826 * median(&mut r.clone()).max(1e-10);
-            if r.iter().all(|&x| x <= lim) { break; }
-            let keep: Vec<bool> = r.iter_mut().map(|x| *x <= lim).collect();
-            if keep.iter().filter(|&&k| k).count() < 6 { break; }
-            c = fit(&|k| keep[k]);
-        }
+        let c = fit_clock_poly(&pts, quad)?;
         let c2 = if quad { c[2] } else { 0.0 };
         Some(Box::new(move |dt: f64| (c[0] + c[1] * dt + c2 * dt * dt, c[1] + 2.0 * c2 * dt)))
     };
@@ -218,6 +197,35 @@ fn predict_sat(sv: u8, tr: &Track, recs: &[Nav], eo: &EarthOrientation, t_end: f
         records, fit: FitState { t0: ts[0], state, srp, rms: fit_rms }, clocks, started, iterations, converged,
         seconds: start.elapsed().as_secs_f64(),
     })
+}
+
+/// A line (or, with `quad`, a quadratic) through clock samples (t, clock): least squares, then up
+/// to three rounds dropping points more than four robust sigmas out (a clock jump or a bad upload)
+/// and refitting. Coefficients c0, c1[, c2] in the samples' time origin; None with under 6 points.
+pub fn fit_clock_poly(pts: &[(f64, f64)], quad: bool) -> Option<Vec<f64>> {
+    if pts.len() < 6 { return None; }
+    let m = if quad { 3 } else { 2 };
+    let fit = |use_: &dyn Fn(usize) -> bool| -> Vec<f64> {
+        let (mut nm, mut g) = (vec![0.0; m * m], vec![0.0; m]);
+        for (k, &(t, y)) in pts.iter().enumerate() {
+            if !use_(k) { continue; }
+            let b = [1.0, t, t * t];
+            for i in 0..m { g[i] += b[i] * y; for j in 0..m { nm[i * m + j] += b[i] * b[j]; } }
+        }
+        solve(m, &nm, &g)
+    };
+    let eval = |c: &[f64], t: f64| c[0] + c[1] * t + if m == 3 { c[2] * t * t } else { 0.0 };
+    let mut c = fit(&|_| true);
+    for _ in 0..3 {
+        let mut r: Vec<f64> = pts.iter().map(|&(t, y)| (y - eval(&c, t)).abs()).collect();
+        let lim = 4.0 * 1.4826 * median(&mut r.clone()).max(1e-10);
+        if r.iter().all(|&x| x <= lim) { break; }
+        let keep: Vec<bool> = r.iter_mut().map(|x| *x <= lim).collect();
+        if keep.iter().filter(|&&k| k).count() < 6 { break; }
+        c = fit(&|k| keep[k]);
+    }
+    if !quad { c.push(0.0); }
+    Some(c)
 }
 
 /// Orbital frequency of GPS satellites: two revolutions per sidereal day.

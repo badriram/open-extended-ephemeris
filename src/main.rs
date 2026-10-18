@@ -2,6 +2,7 @@
 //! extended-ephemeris: offline rapid cold start for GPS. Predicts the satellites' orbit data a
 //! week ahead from IGS ultra-rapid orbits and writes it as RINEX 3 and CASIC frames.
 mod casic;
+mod clockbt;
 mod dop853;
 mod eo;
 mod erfa;
@@ -28,10 +29,12 @@ usage:
                      [--no-tides] [--no-relativity] [--srp-sigma S1,...,S9]
                      [--eop BULLETIN-A-FILE|URL|none]
   extended-ephemeris grade PREDICTED.rnx BROADCAST.rnx[.gz] ...
+  extended-ephemeris clock-backtest [--models quad:5,line:1,...] [--every HOURS] BROADCAST.rnx[.gz] ...
 
 predict (the default) fetches the newest IGS ultra-rapid orbit and the broadcasts it needs from
 BKG, and writes gps-7d.rnx, gps-7d-casic.bin, gps-7d.json and fit-state.txt to --out (default .).
 grade compares a predicted RINEX file with what the satellites broadcast.
+clock-backtest tests clock models against a span of broadcast history (a year of daily files).
 Needs curl and gzip on the path.";
 
 fn main() {
@@ -40,6 +43,7 @@ fn main() {
         Some("-h") | Some("--help") => { println!("{USAGE}"); return; }
         Some("grade") if args.len() >= 3 => grade::run(&args[1], &args[2..]),
         Some("grade") => Err(USAGE.into()),
+        Some("clock-backtest") => clockbt::run(&args[1..]),
         _ => parse(if args.first().map(String::as_str) == Some("predict") { &args[1..] } else { &args })
             .and_then(|o| predict::run(&o)),
     };
