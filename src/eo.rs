@@ -16,25 +16,71 @@ const STEP: f64 = 1800.0;
 /// One ERP row: GPS seconds, x and y pole (rad), UT1 - UTC (s).
 pub type Erp = (f64, f64, f64, f64);
 
-/// IGS ERP text -> rows, extended ten days ahead with UT1 drifting by the last length of day and
-/// the pole held.
+/// IGS ERP text -> its rows, as given.
 pub fn read_erp(text: &str) -> Result<Vec<Erp>, String> {
     let arc = std::f64::consts::PI / 180.0 / 3600.0 * 1e-6;
     let mut rows = Vec::new();
-    let mut lod = 0.0;
     for line in text.lines() {
         let f: Vec<&str> = line.split_whitespace().collect();
         if f.len() < 5 || !f[0].starts_with(|c: char| c.is_ascii_digit()) { continue; }
         let num = |s: &str| s.parse::<f64>().map_err(|e| format!("ERP: {e}"));
         let t = (num(f[0])? - 44244.0) * 86400.0 - UTC_GPS;
-        rows.push((t, num(f[1])? * arc, num(f[2])? * arc, num(f[3])? * 1e-7));
-        lod = num(f[4])? * 1e-7;
+        rows.push((t, num(f[1])? * arc, num(f[2])? * arc, num(f[3])? * 1e-7, num(f[4])? * 1e-7));
     }
-    let &(t, xp, yp, ut) = rows.last().ok_or("no ERP rows")?;
+    if rows.is_empty() { return Err("no ERP rows".into()); }
+    Ok(rows.into_iter().map(|r| (r.0, r.1, r.2, r.3)).collect())
+}
+
+/// The last length of day (s) in an IGS ERP file.
+pub fn last_lod(text: &str) -> f64 {
+    text.lines().filter_map(|l| {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        if f.len() >= 5 && f[0].starts_with(|c: char| c.is_ascii_digit()) { f[4].parse::<f64>().ok() } else { None }
+    }).last().unwrap_or(0.0) * 1e-7
+}
+
+/// Extend ERP rows ten days ahead, UT1 drifting by the last length of day and the pole held.
+pub fn extrapolate(rows: &[Erp], lod: f64) -> Vec<Erp> {
+    let mut out = rows.to_vec();
+    let (t, xp, yp, ut) = *rows.last().unwrap();
     for d in 1..=10 {
-        rows.push((t + d as f64 * 86400.0, xp, yp, ut - lod * d as f64));
+        out.push((t + d as f64 * 86400.0, xp, yp, ut - lod * d as f64));
     }
-    Ok(rows)
+    out
+}
+
+/// IERS Bulletin A's prediction table (lines "year month day MJD x" y" UT1-UTC s") -> rows.
+pub fn read_bulletin_a(text: &str) -> Vec<Erp> {
+    let arc = std::f64::consts::PI / 180.0 / 3600.0;
+    let mut rows = Vec::new();
+    let mut in_pred = false;
+    for line in text.lines() {
+        if line.contains("PREDICTIONS:") { in_pred = true; continue; }
+        if !in_pred { continue; }
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() == 7 && f[0].len() == 4 && f[0].starts_with("20") {
+            let v: Vec<f64> = f.iter().filter_map(|x| x.parse().ok()).collect();
+            if v.len() == 7 {
+                rows.push(((v[3] - 44244.0) * 86400.0 - UTC_GPS, v[4] * arc, v[5] * arc, v[6]));
+            }
+        }
+    }
+    rows
+}
+
+/// IGS ERP rows where they exist (they are measured, and more accurate), then Bulletin A's
+/// predictions, shifted to join the IGS values at the last IGS row. Bulletin A's predictions
+/// include tidal and atmospheric terms that extrapolating the length of day misses.
+pub fn join_bulletin_a(igs: &[Erp], bul: &[Erp]) -> Vec<Erp> {
+    let measured = igs.to_vec();
+    let last = *measured.last().unwrap();
+    if bul.len() < 2 || bul[0].0 > last.0 || bul.last().unwrap().0 < last.0 + 7.0 * 86400.0 {
+        return vec![];
+    }
+    let off = (last.1 - interp(bul, last.0, 1), last.2 - interp(bul, last.0, 2), last.3 - interp(bul, last.0, 3));
+    let mut rows = measured.clone();
+    rows.extend(bul.iter().filter(|r| r.0 > last.0).map(|r| (r.0, r.1 + off.0, r.2 + off.1, r.3 + off.2)));
+    rows
 }
 
 fn interp(rows: &[Erp], t: f64, k: usize) -> f64 {

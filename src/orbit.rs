@@ -8,7 +8,7 @@
 //! the result jitter with its inputs by centimetres to metres, and the fit could not converge.
 use crate::dop853::{A, B, C, STAGES};
 use crate::eo::EarthOrientation;
-use crate::gravity::{gravity, R_E};
+use crate::gravity::{gravity_tide, solid_tide, R_E};
 use crate::linalg::*;
 
 pub const GM_SUN: f64 = 1.32712440018e20;
@@ -37,18 +37,28 @@ pub fn sunlit(r: V3, sun: V3) -> f64 {
     if x <= 0.0 { 0.0 } else if x >= 1.0 { 1.0 } else { x * x * (3.0 - 2.0 * x) }
 }
 
+/// Which optional forces to include (all on by default; switches exist to measure each).
+#[derive(Clone, Copy)]
+pub struct Forces { pub tides: bool }
+
+impl Default for Forces { fn default() -> Self { Forces { tides: true } } }
+
 pub struct Orbit<'a> {
     pub eo: &'a EarthOrientation,
     pub t0: f64,
+    pub forces: Forces,
 }
 
 impl<'a> Orbit<'a> {
-    pub fn new(eo: &'a EarthOrientation, t0: f64) -> Orbit<'a> { Orbit { eo, t0 } }
+    pub fn with(eo: &'a EarthOrientation, t0: f64, forces: Forces) -> Orbit<'a> { Orbit { eo, t0, forces } }
 
     pub fn accel(&self, t: f64, r: V3, v: V3, p: &Srp) -> V3 {
         let m = self.eo.c2t(t);
-        let mut a = mtv(&m, gravity(mv(&m, r)));
         let (sun, moon) = self.eo.bodies(t);
+        let (dc, ds) = if self.forces.tides {
+            solid_tide(&[(mv(&m, sun), GM_SUN), (mv(&m, moon), GM_MOON)])
+        } else { ([0.0; 3], [0.0; 3]) };
+        let mut a = mtv(&m, gravity_tide(mv(&m, r), &dc, &ds));
         for (s, gm) in [(sun, GM_SUN), (moon, GM_MOON)] {
             let d = sub(s, r);
             let (dn, sn) = (norm(d), norm(s));

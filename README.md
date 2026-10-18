@@ -12,24 +12,26 @@ As far as we could find, this is the first open one: the method, the code and th
 
 ## How good it is
 
-Backtest: predicted from the IGS ultra-rapid orbit of 2026-10-13 06:00 UTC, then graded against
-what the satellites actually broadcast over the next 4.7 days ([results](results/2026-10-18-backtest.md),
-`extended-ephemeris grade`). Range error is the satellite's contribution to the error of a
-distance measurement; a position is off by roughly twice it.
+Two backtests: predicted from the IGS ultra-rapid orbits of 2026-10-13 06:00 and 2026-10-14 00:00
+UTC, then graded against what the satellites actually broadcast over the following days
+([results](results/2026-10-18-backtest.md), `extended-ephemeris grade`). Range error is the
+satellite's contribution to the error of a distance measurement; a position is off by roughly
+twice it.
 
-| days after the IGS orbit | range error, median | 95th percentile | worst | satellite position, median |
-| --- | --- | --- | --- | --- |
-| 0-1 (the IGS's own prediction) | 0.3-0.5 m | 1.1-1.9 m | 4.1 m | 0.7 m |
-| 1-2 | 0.8-1.1 m | 3.2-5.1 m | 7.0 m | 0.9 m |
-| 2-3 | 1.5-1.9 m | 6.8-8.6 m | 11 m | 1.3-1.6 m |
-| 3-4 | 2.5-3.2 m | 9.9-12 m | 18 m | 2.2-3.1 m |
-| 4-5 | 4.0-4.7 m | 15-17 m | 25 m | 4.1-5.0 m |
+| days after the IGS orbit | range error, median | 95th percentile | worst |
+| --- | --- | --- | --- |
+| 0-1 (the IGS's own prediction) | 0.2-0.3 m | 0.7-1.9 m | 3.1 m |
+| 1-2 | 0.3-0.6 m | 2.3-4.3 m | 5.9 m |
+| 2-3 | 0.6-1.2 m | 4.6-7.0 m | 8.8 m |
+| 3-4 | 1.0-1.6 m | 6.1-9.8 m | 11 m |
+| 4-5 | 1.3-2.2 m | 7.5-12.3 m | 14.6 m |
 
-So after five days offline, a first fix is typically about 10 m out, and the receiver replaces the
-prediction with the satellites' own data once it has tracked them for about 30 s. Satellite
-clocks, not orbits, are now most of the error. Days 5-7 have not been graded yet, and no receiver
-has yet been given predicted records (they are ordinary records with a current reference time,
-which receivers accept from other sources).
+So after five days offline, a first fix is typically a few metres out, and the receiver replaces
+the prediction with the satellites' own data once it has tracked them for about 30 s. These
+figures are at least as good as every published consumer-grade extended-ephemeris result we
+found. Days 5-7 have not been graded yet, and no receiver has yet been given predicted records
+(they are ordinary records with a current reference time, which receivers accept from other
+sources).
 
 ## How it works
 
@@ -40,20 +42,25 @@ Per GPS satellite, with plain physics and least squares (no machine learning):
 2. **Fit a force model** to those 48 h: Earth's gravity field (EGM2008 to degree and order 4), the
    Sun and Moon, and solar radiation pressure as five ECOM-style terms with Earth's shadow and a
    smooth penumbra; Earth orientation from the IAU 2006/2000A model (ERFA) with the IGS's polar
-   motion and UT1. Fitted by Levenberg-Marquardt, with a priori limits on the minor radiation
+   motion and UT1, continued by IERS Bulletin A's predictions. Fitted by Levenberg-Marquardt, with a priori limits on the minor radiation
    terms, to 0.1-0.26 m RMS.
 3. **Integrate a week ahead** (8th-order Dormand-Prince, fixed 100 s steps, so the result is a
    smooth function of the inputs).
 4. **Fit an ordinary broadcast ephemeris** (IS-GPS-200 LNAV) to every 2 h of the trajectory: to the
    IGS's prediction while it lasts, then to ours.
 5. **Calibrate against the satellites' own broadcasts** over the measured day: the antenna offset
-   (IGS orbits refer to the centre of mass) and the clock reference. The clock is a straight line
-   through the IGS's clock estimates.
+   (IGS orbits refer to the centre of mass).
+6. **Predict each clock from the satellite's own broadcast clocks over the last five days**, as a
+   quadratic: GPS clocks age, so their rate drifts. This was the biggest single gain: clocks were
+   98% of the remaining error, and the quadratic cut the five-day median from 4.7 m to 2.2 m. The
+   clock history travels in `fit-state.txt`, so a run downloads only the newest broadcasts.
 
-Three faults found on the way are recorded in the [results](results/2026-10-18-backtest.md): an
-Earth-orientation mix of two IAU conventions (0.49° of error), noisy adaptive integration, and an
-unconverged fit. Fixing them cut the five-day error from 10.6 m to 4.7 m (median) and from 66 m to
-25 m (worst).
+What changed the numbers, and what did not, is recorded in the [results](results/2026-10-18-backtest.md):
+fixing an Earth-orientation mix of two IAU conventions (0.49° of error), noisy adaptive
+integration and an unconverged fit took the five-day median from 10.6 m to 4.7 m; the clock model
+then took it to 2.2 m. The solid Earth tide and Bulletin A are physically right but changed the
+results by less than the backtests' noise: Earth rotation is not what limits the orbits (even the
+UT1 measured afterwards did no better), the force model is.
 
 ## Running it
 
@@ -72,13 +79,15 @@ That fetches the newest IGS ultra-rapid orbit and the broadcasts it needs from B
 | `gps-7d.rnx` | the predicted records as **RINEX 3.04** navigation data: 32 satellites, one every 2 h, 7 days |
 | `gps-7d-casic.bin` | the same as **CASIC MSG-GPSEPH** frames (223 kB) for AT6558 receivers: Quectel L76K, ATGM336H and others |
 | `gps-7d.json` | when and from what it was made, fit quality, and a self-check against the satellites' current broadcasts (the run fails if that check is off) |
-| `fit-state.txt` | each satellite's fitted state; `--warm fit-state.txt` starts the next run from it |
+| `fit-state.txt` | each satellite's fitted state and recent broadcast clocks (~100 kB); `--warm fit-state.txt` starts the next run from it, and the run then needs only the newest broadcasts |
 
 **A whole run takes about 2 seconds** (32 satellites on 14 cores, 22 CPU-seconds; downloads
 aside). The first version, in Python, took 5.6 minutes for identical results.
 
 Other options: `--sp3 FILE|URL --erp FILE|URL` and `--rinex FILE|URL ...` to predict from given
-files, `--days N`, `--jobs N`. `extended-ephemeris grade PREDICTED.rnx BROADCAST.rnx.gz ...`
+files, `--eop FILE|URL|none` (Bulletin A; default the latest from the IERS), `--days N`, `--jobs N`,
+and for experiments `--clock line|harmonic|harmonic-drift|broadcast-line:DAYS|broadcast-quad:DAYS`
+and `--no-tides`. `extended-ephemeris grade PREDICTED.rnx BROADCAST.rnx.gz ...`
 grades a prediction against what the satellites broadcast (BKG keeps a week of daily files at
 `https://igs.bkg.bund.de/root_ftp/IGS/BRDC/<year>/<day>/BRDC00WRD_S_<year><day>0000_01D_MN.rnx.gz`).
 
@@ -103,6 +112,8 @@ manual for now; with runs of seconds it can follow each IGS issue, four times a 
 
 ## Credits and sources
 
+- [IERS](https://www.iers.org/) Bulletin A Earth orientation predictions; IERS Conventions 2010
+  for the solid Earth tide.
 - [IGS](https://igs.org/) ultra-rapid orbits and Earth rotation parameters, and merged broadcast
   ephemeris, via [BKG](https://igs.bkg.bund.de/). NASA CDDIS archives the same products.
 - [ERFA](https://github.com/liberfa/erfa) 2.0.1, the open copy of the IAU's SOFA routines; the 37

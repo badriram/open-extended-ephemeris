@@ -24,7 +24,8 @@ extended-ephemeris: a week of predicted GPS orbit data (extended ephemeris)
 usage:
   extended-ephemeris [predict] [--out DIR] [--days N] [--warm fit-state.txt]
                      [--sp3 FILE|URL --erp FILE|URL] [--rinex FILE|URL ...]
-                     [--max-check-m M] [--jobs N]
+                     [--max-check-m M] [--jobs N] [--clock line|harmonic|harmonic-drift]
+                     [--no-tides] [--eop BULLETIN-A-FILE|URL|none]
   extended-ephemeris grade PREDICTED.rnx BROADCAST.rnx[.gz] ...
 
 predict (the default) fetches the newest IGS ultra-rapid orbit and the broadcasts it needs from
@@ -51,6 +52,8 @@ fn parse(args: &[String]) -> Result<predict::Options, String> {
     let mut o = predict::Options {
         out: ".".into(), sp3: None, erp: None, rinex: vec![], days: 7.0, warm: None, max_check_m: 5.0,
         jobs: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4),
+        forces: orbit::Forces::default(), clock: predict::ClockModel::BroadcastQuad(5.0),
+        eop: predict::BULLETIN_A.into(),
     };
     let mut i = 0;
     let val = |i: usize| args.get(i + 1).cloned().ok_or_else(|| format!("{} needs a value\n\n{USAGE}", args[i]));
@@ -63,6 +66,19 @@ fn parse(args: &[String]) -> Result<predict::Options, String> {
             "--days" => { o.days = val(i)?.parse().map_err(|_| "--days: a number")?; i += 2; }
             "--max-check-m" => { o.max_check_m = val(i)?.parse().map_err(|_| "--max-check-m: a number")?; i += 2; }
             "--jobs" => { o.jobs = val(i)?.parse().map_err(|_| "--jobs: a number")?; i += 2; }
+            "--no-tides" => { o.forces.tides = false; i += 1; }
+            "--eop" => { o.eop = val(i)?; i += 2; }
+            "--clock" => {
+                o.clock = match val(i)?.as_str() {
+                    "line" => predict::ClockModel::Line,
+                    "harmonic" => predict::ClockModel::Harmonic,
+                    "harmonic-drift" => predict::ClockModel::HarmonicDrift,
+                    v if v.starts_with("broadcast-line:") => predict::ClockModel::BroadcastLine(v[15..].parse().map_err(|_| "days")?),
+                    v if v.starts_with("broadcast-quad:") => predict::ClockModel::BroadcastQuad(v[15..].parse().map_err(|_| "days")?),
+                    v => return Err(format!("--clock {v}: line, harmonic, harmonic-drift, broadcast-line:DAYS or broadcast-quad:DAYS")),
+                };
+                i += 2;
+            }
             "--rinex" => {
                 i += 1;
                 while i < args.len() && !args[i].starts_with("--") { o.rinex.push(args[i].clone()); i += 1; }

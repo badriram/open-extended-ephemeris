@@ -43,8 +43,40 @@ thread_local! {
 }
 
 /// Acceleration from the geopotential at an Earth-fixed position (m), m/s².
-pub fn gravity(r: V3) -> V3 {
-    COEF.with(|(cc, ss)| {
+#[allow(dead_code)]
+pub fn gravity(r: V3) -> V3 { gravity_tide(r, &[0.0; 3], &[0.0; 3]) }
+
+/// Solid Earth tide, IERS Conventions 2010 section 6.2.1, step 1 (frequency-independent, elastic
+/// Love numbers): the Sun and Moon raise a tide in the Earth that changes the fully normalised
+/// degree-2 coefficients by dC2m - i dS2m = k2m/5 * sum (GMj/GM)(R/rj)^3 P2m(sin phi_j) e^(-i m lambda_j).
+/// EGM2008 is a tide-free model, so the whole change is added. Bodies are Earth-fixed positions (m).
+/// Returns (dC20, dC21, dC22), (0, dS21, dS22), normalised.
+pub fn solid_tide(bodies: &[(V3, f64)]) -> ([f64; 3], [f64; 3]) {
+    const K2: [f64; 3] = [0.29525, 0.29470, 0.29801];
+    let (mut dc, mut ds) = ([0.0; 3], [0.0; 3]);
+    for &(b, gm) in bodies {
+        let rb = (b[0] * b[0] + b[1] * b[1] + b[2] * b[2]).sqrt();
+        let (sp, cp) = (b[2] / rb, (b[0] * b[0] + b[1] * b[1]).sqrt() / rb);
+        let lam = b[1].atan2(b[0]);
+        let f = gm / GM * (R_E / rb).powi(3);
+        let p = [5f64.sqrt() * (3.0 * sp * sp - 1.0) / 2.0, 15f64.sqrt() * sp * cp, 15f64.sqrt() / 2.0 * cp * cp];
+        for m in 0..3 {
+            dc[m] += K2[m] / 5.0 * f * p[m] * (m as f64 * lam).cos();
+            ds[m] += K2[m] / 5.0 * f * p[m] * (m as f64 * lam).sin();
+        }
+    }
+    (dc, ds)
+}
+
+/// The geopotential with the degree-2 coefficients changed by (dc, ds), fully normalised.
+pub fn gravity_tide(r: V3, dc: &[f64; 3], ds: &[f64; 3]) -> V3 {
+    COEF.with(|(cc0, ss0)| {
+        let (mut cc, mut ss) = (*cc0, *ss0);
+        for m in 0..3 {
+            let f = ((if m == 0 { 1.0 } else { 2.0 }) * 5.0 * factorial(2 - m) / factorial(2 + m)).sqrt();
+            cc[2][m] += dc[m] * f;
+            ss[2][m] += ds[m] * f;
+        }
         const N: usize = NMAX + 2;
         let (x, y, z) = (r[0], r[1], r[2]);
         let r2 = x * x + y * y + z * z;
