@@ -18,7 +18,8 @@ measured plus 24 h predicted), with our force model doing all the work from day 
   of broadcasts before the last 1.5, predict the last 1.5, take the median error, then double it
   and grow it with age as `(age / 0.75 d)^1.3`.
 - **u-blox:** `gps-7d-ubx.bin` now carries UBX-MGA-GAL-EPH for Galileo next to UBX-MGA-GPS-EPH.
-  CASIC stays GPS only, since the AT6558's Galileo assistance format is not documented.
+  CASIC stays GPS only: the base AT6558 does not track Galileo, and CASIC has no documented
+  Galileo ephemeris message for variants that do.
   The file names keep `gps-` so that existing URLs keep working.
 
 ## Timing of CODE's files
